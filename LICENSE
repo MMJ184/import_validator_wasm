@@ -1,0 +1,3 @@
+Get-ChildItem -Recurse -Directory -Filter dist | Remove-Item -Recurse -Force
+Get-ChildItem -Recurse -Filter "*.tsbuildinfo" | Remove-Item -Force
+pnpm -r build

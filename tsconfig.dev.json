@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@import-validator/core": ["packages/core/src"],
+      "@import-validator/sdk": ["packages/sdk/src"],
+      "@import-validator/worker": ["packages/worker/src"]
+    }
+  }
+}

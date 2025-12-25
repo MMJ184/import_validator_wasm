@@ -1,0 +1,17 @@
+{
+  "name": "import-validator-wasm",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "build": "pnpm -r build",
+    "build:wasm": "pnpm --filter @import-validator/core run build:wasm",
+    "dev:ex": "pnpm --filter vite-ts-demo run dev"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "typescript": "^5.9.3"
+  }
+}

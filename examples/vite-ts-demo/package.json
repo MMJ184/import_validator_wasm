@@ -1,0 +1,18 @@
+{
+  "name": "vite-ts-demo",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@import-validator/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "vite": "^7.3.0",
+    "typescript": "^5.0.0",
+    "@types/node": "^25.0.3"
+  }
+}

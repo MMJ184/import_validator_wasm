@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "types": ["vite/client", "node"],
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@import-validator/worker/*": ["../../packages/worker/src/*"],
+      "@import-validator/core/*": ["../../packages/core/src/*"]
+    }
+  },
+  "include": ["src", "vite.config.ts"],
+}
