@@ -1,6 +1,8 @@
 // crates/validator/src/lib.rs
 mod schema;
+mod errors;
 
+use errors::{ColKind, ErrorCode, PackedError};
 use schema::{ColumnType, DateFormat, Progress, Schema};
 
 use csv_core::{ReadRecordResult, Reader, ReaderBuilder, Terminator};
@@ -8,33 +10,6 @@ use rust_decimal::Decimal;
 use rust_decimal::RoundingStrategy;
 use std::str;
 use wasm_bindgen::prelude::*;
-
-#[repr(u8)]
-#[derive(Clone, Copy, Debug)]
-enum ErrorCode {
-    MissingRequired = 1,
-    InvalidType = 2,
-    MaxLengthExceeded = 3,
-    NotAllowed = 4,
-    InvalidUtf8 = 5,
-    MissingRequiredColumn = 6,
-    ExtraColumn = 7,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct PackedError {
-    row: u32,  // 1-based data row (header excluded), or 0 for header-level errors
-    col: u32,  // usually schema column index; for ExtraColumn we pack input column index
-    code: u8,  // ErrorCode as u8
-}
-
-impl PackedError {
-    fn to_words(self) -> [u32; 2] {
-        // word0 = row
-        // word1 = (col << 8) | code
-        [self.row, (self.col << 8) | (self.code as u32)]
-    }
-}
 
 #[wasm_bindgen]
 pub struct ValidatorEngine {
@@ -57,6 +32,9 @@ pub struct ValidatorEngine {
     // For JS: column names in schema order
     schema_col_names: Vec<String>,
 
+    // For JS: input (CSV) header names in input order (only when has_headers=true)
+    input_header_names: Vec<String>,
+
     // Row counter (data rows only, 1-based)
     data_row: u32,
 
@@ -76,7 +54,11 @@ pub struct ValidatorEngine {
 #[wasm_bindgen]
 impl ValidatorEngine {
     #[wasm_bindgen(constructor)]
-    pub fn new(schema_json: &str, max_errors: u32, emit_normalized: bool) -> Result<ValidatorEngine, JsValue> {
+    pub fn new(
+        schema_json: &str,
+        max_errors: u32,
+        emit_normalized: bool,
+    ) -> Result<ValidatorEngine, JsValue> {
         #[cfg(feature = "dev")]
         console_error_panic_hook::set_once();
 
@@ -88,7 +70,11 @@ impl ValidatorEngine {
         rb.terminator(Terminator::CRLF);
         let rdr = rb.build();
 
-        let schema_col_names = schema.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+        let schema_col_names = schema
+            .columns
+            .iter()
+            .map(|c| c.name.clone())
+            .collect::<Vec<_>>();
 
         // If no headers, we consider header already "parsed" and schema_to_input is identity
         let header_parsed = !schema.has_headers;
@@ -107,6 +93,7 @@ impl ValidatorEngine {
             input_to_schema: Vec::new(),
             schema_to_input,
             schema_col_names,
+            input_header_names: Vec::new(),
             data_row: 0,
             errors: Vec::new(),
             max_errors,
@@ -141,7 +128,7 @@ impl ValidatorEngine {
     }
 
     /// Drain up to `max` packed errors.
-    /// Each error is 2 u32 words: [row, (col<<8)|code].
+    /// Each error is 2 u32 words: [row, (kind<<31) | (col<<8) | code].
     pub fn take_errors_packed(&mut self, max: u32) -> Vec<u32> {
         let n = (max as usize).min(self.errors.len());
         let mut out = Vec::with_capacity(n * 2);
@@ -156,6 +143,12 @@ impl ValidatorEngine {
     /// Schema column names in schema order, as JSON array.
     pub fn schema_columns_json(&self) -> String {
         serde_json::to_string(&self.schema_col_names).unwrap()
+    }
+
+    /// Input (CSV) header column names in input order, as JSON array.
+    /// Empty array if schema.has_headers=false or header not parsed yet.
+    pub fn input_columns_json(&self) -> String {
+        serde_json::to_string(&self.input_header_names).unwrap()
     }
 
     /// Drain normalized CSV bytes accumulated so far (if enabled).
@@ -175,14 +168,15 @@ impl ValidatorEngine {
             7 => "ExtraColumn",
             _ => "Unknown",
         }
-            .to_string()
+        .to_string()
     }
 }
 
 impl ValidatorEngine {
     fn parse_slice(&mut self, mut input: &[u8]) {
         while !input.is_empty() {
-            let (res, nin, nout, nends) = self.rdr.read_record(input, &mut self.out, &mut self.ends);
+            let (res, nin, nout, nends) =
+                self.rdr.read_record(input, &mut self.out, &mut self.ends);
             input = &input[nin..];
 
             match res {
@@ -213,9 +207,7 @@ impl ValidatorEngine {
                 ReadRecordResult::OutputEndsFull => {
                     self.ends.resize(self.ends.len() * 2, 0);
                 }
-                ReadRecordResult::End => {
-                    return;
-                }
+                ReadRecordResult::End => return,
             }
         }
     }
@@ -275,15 +267,22 @@ impl ValidatorEngine {
 
             let schema_idx_opt = if self.schema.has_headers {
                 self.input_to_schema.get(input_col).copied().flatten()
+            } else if input_col < self.schema.columns.len() {
+                Some(input_col)
             } else {
-                if input_col < self.schema.columns.len() { Some(input_col) } else { None }
+                None
             };
 
             if let Some(schema_idx) = schema_idx_opt {
                 self.validate_field(schema_idx, field);
             } else if self.schema.fail_on_extra_columns {
-                // pack input column index into `col`
-                self.push_err(self.data_row, input_col as u32, ErrorCode::ExtraColumn);
+                // input column index in `col`, mark as input-kind
+                self.push_err(
+                    self.data_row,
+                    input_col as u32,
+                    ErrorCode::ExtraColumn,
+                    ColKind::Input,
+                );
             }
 
             if self.hit_error_limit() {
@@ -297,7 +296,12 @@ impl ValidatorEngine {
             if ends.len() < cols_len {
                 for schema_idx in ends.len()..cols_len {
                     if self.schema.columns[schema_idx].required {
-                        self.push_err(self.data_row, schema_idx as u32, ErrorCode::MissingRequired);
+                        self.push_err(
+                            self.data_row,
+                            schema_idx as u32,
+                            ErrorCode::MissingRequired,
+                            ColKind::Schema,
+                        );
                         if self.hit_error_limit() {
                             return;
                         }
@@ -328,12 +332,16 @@ impl ValidatorEngine {
             let name = match str::from_utf8(trim_ascii(field)) {
                 Ok(s) => s.to_string(),
                 Err(_) => {
-                    self.push_err(0, 0, ErrorCode::InvalidUtf8);
+                    // header-level: invalid utf8 (no useful col index, keep schema-kind)
+                    self.push_err(0, 0, ErrorCode::InvalidUtf8, ColKind::Schema);
                     continue;
                 }
             };
             input_names.push(name);
         }
+
+        // Store input header names for JS/UI
+        self.input_header_names = input_names.clone();
 
         // Build mappings
         self.input_to_schema = vec![None; input_names.len()];
@@ -346,7 +354,7 @@ impl ValidatorEngine {
             }
         }
 
-        // Ensure required columns exist (two-phase to avoid borrow issues)
+        // Ensure required columns exist
         let mut missing: Vec<usize> = Vec::new();
         for (schema_idx, col) in self.schema.columns.iter().enumerate() {
             if col.required {
@@ -357,7 +365,12 @@ impl ValidatorEngine {
             }
         }
         for schema_idx in missing {
-            self.push_err(0, schema_idx as u32, ErrorCode::MissingRequiredColumn);
+            self.push_err(
+                0,
+                schema_idx as u32,
+                ErrorCode::MissingRequiredColumn,
+                ColKind::Schema,
+            );
         }
     }
 
@@ -366,14 +379,24 @@ impl ValidatorEngine {
 
         let required = self.schema.columns[schema_idx].required;
         if required && trimmed.is_empty() {
-            self.push_err(self.data_row, schema_idx as u32, ErrorCode::MissingRequired);
+            self.push_err(
+                self.data_row,
+                schema_idx as u32,
+                ErrorCode::MissingRequired,
+                ColKind::Schema,
+            );
             return;
         }
 
         let max_len = self.schema.columns[schema_idx].max_len;
         if let Some(max_len) = max_len {
             if trimmed.len() > max_len {
-                self.push_err(self.data_row, schema_idx as u32, ErrorCode::MaxLengthExceeded);
+                self.push_err(
+                    self.data_row,
+                    schema_idx as u32,
+                    ErrorCode::MaxLengthExceeded,
+                    ColKind::Schema,
+                );
                 return;
             }
         }
@@ -381,7 +404,12 @@ impl ValidatorEngine {
         let s = match str::from_utf8(trimmed) {
             Ok(v) => v,
             Err(_) => {
-                self.push_err(self.data_row, schema_idx as u32, ErrorCode::InvalidUtf8);
+                self.push_err(
+                    self.data_row,
+                    schema_idx as u32,
+                    ErrorCode::InvalidUtf8,
+                    ColKind::Schema,
+                );
                 return;
             }
         };
@@ -392,7 +420,12 @@ impl ValidatorEngine {
             !allowed.is_empty() && !allowed.iter().any(|a| a == s)
         };
         if not_allowed {
-            self.push_err(self.data_row, schema_idx as u32, ErrorCode::NotAllowed);
+            self.push_err(
+                self.data_row,
+                schema_idx as u32,
+                ErrorCode::NotAllowed,
+                ColKind::Schema,
+            );
             return;
         }
 
@@ -401,19 +434,36 @@ impl ValidatorEngine {
             ColumnType::String => {}
             ColumnType::Int => {
                 if !is_valid_int(s) {
-                    self.push_err(self.data_row, schema_idx as u32, ErrorCode::InvalidType);
+                    self.push_err(
+                        self.data_row,
+                        schema_idx as u32,
+                        ErrorCode::InvalidType,
+                        ColKind::Schema,
+                    );
                 }
             }
             ColumnType::Decimal => {
                 let precision = self.schema.columns[schema_idx].precision.unwrap_or(2);
                 if !is_valid_decimal(s, precision) {
-                    self.push_err(self.data_row, schema_idx as u32, ErrorCode::InvalidType);
+                    self.push_err(
+                        self.data_row,
+                        schema_idx as u32,
+                        ErrorCode::InvalidType,
+                        ColKind::Schema,
+                    );
                 }
             }
             ColumnType::Date => {
-                let fmt = self.schema.columns[schema_idx].date_format.unwrap_or(DateFormat::YmdDash);
+                let fmt = self.schema.columns[schema_idx]
+                    .date_format
+                    .unwrap_or(DateFormat::YmdDash);
                 if !is_valid_date(s, fmt) {
-                    self.push_err(self.data_row, schema_idx as u32, ErrorCode::InvalidType);
+                    self.push_err(
+                        self.data_row,
+                        schema_idx as u32,
+                        ErrorCode::InvalidType,
+                        ColKind::Schema,
+                    );
                 }
             }
         }
@@ -469,7 +519,9 @@ impl ValidatorEngine {
             ColumnType::Int => s.as_bytes().to_vec(),
             ColumnType::Decimal => {
                 let precision = col.precision.unwrap_or(2);
-                normalize_decimal(s, precision).unwrap_or_default().into_bytes()
+                normalize_decimal(s, precision)
+                    .unwrap_or_default()
+                    .into_bytes()
             }
             ColumnType::Date => {
                 let fmt = col.date_format.unwrap_or(DateFormat::YmdDash);
@@ -499,15 +551,11 @@ impl ValidatorEngine {
         self.normalized.push(b'"');
     }
 
-    fn push_err(&mut self, row: u32, col: u32, code: ErrorCode) {
+    fn push_err(&mut self, row: u32, col: u32, code: ErrorCode, kind: ColKind) {
         if (self.errors.len() as u32) >= self.max_errors {
             return;
         }
-        self.errors.push(PackedError {
-            row,
-            col,
-            code: code as u8,
-        });
+        self.errors.push(PackedError { row, col, code, kind });
     }
 
     fn hit_error_limit(&self) -> bool {
@@ -602,7 +650,7 @@ fn is_valid_date(s: &str, fmt: DateFormat) -> bool {
         },
         d as u8,
     )
-        .is_ok()
+    .is_ok()
 }
 
 fn normalize_date(s: &str, fmt: DateFormat) -> Option<String> {
@@ -626,7 +674,7 @@ fn normalize_date(s: &str, fmt: DateFormat) -> Option<String> {
         time::Month::try_from(m as u8).ok()?,
         d as u8,
     )
-        .ok()?;
+    .ok()?;
 
     Some(format!(
         "{:04}-{:02}-{:02}",

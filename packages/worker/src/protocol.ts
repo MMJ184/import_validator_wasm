@@ -1,4 +1,4 @@
-import type { PackedError, Progress } from "@import-validator/core";
+import type { DecodedError, Progress} from "@import-validator/core";
 
 export type WorkerInit = {
     type: "init";
@@ -18,7 +18,7 @@ export type WorkerRequest = WorkerInit | WorkerValidate;
 export type WorkerResponse =
     | { type: "ready"; columns: string[] }
     | { type: "progress"; progress: Progress }
-    | { type: "errors"; errors: PackedError[] }
+    | { type: "errors"; errors: DecodedError[] }
     | { type: "normalized"; chunk: Uint8Array }
     | { type: "done" }
     | { type: "fatal"; message: string };

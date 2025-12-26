@@ -84,7 +84,7 @@ $run.onclick = () => {
                 $errors.textContent =
                     shown.length === 0
                         ? "(none)"
-                        : shown.map((e) => `row=${e.row} col=${e.col} code=${e.code}`).join("\n");
+                        : shown.map((e) => e.message).join("\n");
             },
 
             onNormalized: (chunk) => {
