@@ -8,11 +8,13 @@
     "build": "vite build"
   },
   "dependencies": {
-    "@import-validator/sdk": "workspace:*"
+    "@import-validator/core": "workspace:*",
+    "@import-validator/sdk": "workspace:*",
+    "@import-validator/worker": "workspace:*"
   },
   "devDependencies": {
-    "vite": "^7.3.0",
-    "typescript": "^5.0.0",
-    "@types/node": "^25.0.3"
+    "@types/node": "^25.0.3",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.0"
   }
 }

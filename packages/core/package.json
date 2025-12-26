@@ -7,12 +7,16 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./wasm": {
+      "import": "./dist/wasm/index.js",
+      "types": "./dist/wasm/index.d.ts"
     }
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-wasm.mjs",
-    "build:wasm": "node scripts/build-wasm.mjs"
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build": "pnpm run build:wasm && tsc -p tsconfig.json && node scripts/copy-wasm.mjs"
   }
 }

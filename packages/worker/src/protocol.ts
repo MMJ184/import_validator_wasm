@@ -2,7 +2,7 @@ import type { PackedError, Progress } from "@import-validator/core";
 
 export type WorkerInit = {
     type: "init";
-    wasmUrl: string;
+    wasmUrl?: string;
     schema: object;
     maxErrors: number;
     emitNormalized: boolean;

@@ -9,6 +9,10 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
 
     try {
         if (e.data.type === "init") {
+            if (!e.data.wasmUrl) {
+                throw new Error("wasmUrl is required (pass it from SDK/client).");
+            }
+
             engine = await createEngine(
                 e.data.wasmUrl,
                 e.data.schema,
@@ -16,17 +20,16 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
                 e.data.emitNormalized
             );
 
-            post({
-                type: "ready",
-                columns: engine.schemaColumns(),
-            });
+            post({ type: "ready", columns: engine.schemaColumns() });
+            return;
         }
 
         if (e.data.type === "validate") {
             if (!engine) throw new Error("Engine not initialized");
             await runCsv(e.data.file, engine, post);
+            return;
         }
     } catch (err: any) {
-        post({ type: "fatal", message: err.message || String(err) });
+        post({ type: "fatal", message: err?.message || String(err) });
     }
 };

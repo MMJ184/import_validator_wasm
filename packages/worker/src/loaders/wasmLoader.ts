@@ -7,5 +7,5 @@ export async function createEngine(
     emitNormalized: boolean
 ) {
     await initWasm(wasmUrl);
-    return new Engine(schema, maxErrors, emitNormalized);
+    return await Engine.create(schema, maxErrors, emitNormalized);
 }

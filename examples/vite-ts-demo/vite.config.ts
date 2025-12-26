@@ -1,23 +1,27 @@
 import { defineConfig } from "vite";
-import path from 'path';
 
 export default defineConfig({
+    // Ensure workspace packages resolve correctly
     resolve: {
-        alias: {
-            '@import-validator/worker': path.resolve(__dirname, '../../packages/worker/src'),
-            '@import-validator/core': path.resolve(__dirname, '../../packages/core/src'),
-        },
+        preserveSymlinks: true
     },
-    server: {
-        fs: {
-            allow: [path.resolve(__dirname, '../..')],
-        },
+
+    // WASM + Worker friendly defaults
+    worker: {
+        format: "es"
     },
-    optimizeDeps: {
-        exclude: ['@import-validator/worker', '@import-validator/core'],
-    },
+
     build: {
         target: "es2020",
-        outDir: "dist",
+        sourcemap: true
     },
+
+    optimizeDeps: {
+        // Prevent Vite from trying to prebundle wasm-pack output
+        exclude: [
+            "@import-validator/core",
+            "@import-validator/sdk",
+            "@import-validator/worker"
+        ]
+    }
 });

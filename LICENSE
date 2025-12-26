@@ -1,3 +1,57 @@
 Get-ChildItem -Recurse -Directory -Filter dist | Remove-Item -Recurse -Force
 Get-ChildItem -Recurse -Filter "*.tsbuildinfo" | Remove-Item -Force
 pnpm -r build
+
+You are an expert in Rust, WebAssembly, and browser performance.
+
+Create a WebAssembly-based CSV/Excel validation engine designed to run entirely in the browser.
+
+Core functionality:
+- Accept CSV input as Uint8Array
+- Stream and parse rows incrementally
+- Validate against a schema:
+  - Required columns
+  - Data types (string, int, decimal, date)
+  - Max length
+  - Allowed values
+- Normalize data:
+  - Trim whitespace
+  - Normalize dates to ISO format
+  - Normalize decimals with fixed precision
+- Return validation errors with:
+  - Row number
+  - Column name
+  - Error reason
+
+Performance requirements:
+- Must handle CSV files up to 200MB
+- Must not load entire file into memory
+- Must work inside a Web Worker
+- Avoid JavaScript garbage collection pressure
+
+Tech constraints:
+- Rust compiled to WebAssembly
+- wasm-bindgen for JS bindings
+- No dynamic memory leaks
+- Deterministic output across browsers
+
+Deliver:
+1. Rust code (streaming CSV parser)
+2. Wasm bindings
+3. JS worker integration
+4. Example schema definition
+5. Example validation result format
+6. Notes on browser memory limits and optimization
+
+This module should be usable as a core engine inside SaaS import screens.
+
+import workerUrl from "@import-validator/worker/worker?url";
+
+createValidator({
+  workerUrl,
+  wasmUrl: new URL("@import-validator/core/wasm/pkg/import_validator_wasm_bg.wasm", import.meta.url),
+  schema
+});
+
+import WorkerCtor from "@import-validator/worker/worker?worker"; // depends on config
+createValidator({ workerFactory: () => new WorkerCtor(), schema });

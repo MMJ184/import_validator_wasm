@@ -1,16 +1,36 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
-    <title>Import Validator Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Import Validator Demo (Vite)</title>
 </head>
 <body>
-<h1>Import Validator WASM Demo</h1>
+<div id="app">
+    <h1>CSV Validator (WASM + Worker)</h1>
 
-<input id="file" type="file" accept=".csv,text/csv" />
-<button id="run">Validate</button>
-<pre id="log" style="white-space:pre-wrap;"></pre>
+    <div class="card">
+        <label>Pick CSV file:</label>
+        <input id="file" type="file" accept=".csv,text/csv" />
+        <button id="run">Validate</button>
+    </div>
 
-<script type="module" src="./src/main.ts"></script>
+    <div class="card">
+        <h3>Status</h3>
+        <pre id="status">Idle</pre>
+    </div>
+
+    <div class="card">
+        <h3>Errors</h3>
+        <pre id="errors">(none)</pre>
+    </div>
+
+    <div class="card">
+        <h3>Normalized output (first chunks)</h3>
+        <pre id="normalized">(disabled)</pre>
+    </div>
+</div>
+
+<script type="module" src="/src/main.ts"></script>
 </body>
 </html>

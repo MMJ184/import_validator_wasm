@@ -10,8 +10,24 @@ export interface ValidatorEvents {
 }
 
 export interface ValidatorOptions {
-    wasmUrl: string;
     schema: object;
+
+    /**
+     * Optional. If not provided, core can still use its own default wasm URL
+     * (recommended: always provide in real apps).
+     */
+    wasmUrl?: string | URL;
+
+    /**
+     * Recommended: Provide a resolved Worker URL (works in all bundlers).
+     */
+    workerUrl?: string | URL;
+
+    /**
+     * Alternative to workerUrl: provide a Worker factory.
+     */
+    workerFactory?: () => Worker;
+
     maxErrors?: number;
     emitNormalized?: boolean;
 }

@@ -6,12 +6,17 @@
     "examples/*"
   ],
   "scripts": {
-    "build": "pnpm -r build",
+    "build": "pnpm run build:wasm && pnpm -r build",
     "build:wasm": "pnpm --filter @import-validator/core run build:wasm",
-    "dev:ex": "pnpm --filter vite-ts-demo run dev"
+    "dev:ex": "pnpm --filter vite-ts-demo run dev",
+    "clean": "pnpm -r exec rimraf node_modules dist",
+    "clean:all": "pnpm clean && pnpm store prune",
+    "reset": "pnpm clean:all && pnpm install"
   },
   "devDependencies": {
     "@types/node": "^25.0.3",
+    "rimraf": "^6.1.2",
     "typescript": "^5.9.3"
-  }
+  },
+  "packageManager": "pnpm@10.26.2+sha512.0e308ff2005fc7410366f154f625f6631ab2b16b1d2e70238444dd6ae9d630a8482d92a451144debc492416896ed16f7b114a86ec68b8404b2443869e68ffda6"
 }
