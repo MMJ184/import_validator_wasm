@@ -67,7 +67,7 @@ impl ValidatorEngine {
 
         let mut rb = ReaderBuilder::new();
         rb.delimiter(schema.delimiter);
-        rb.terminator(Terminator::CRLF);
+        rb.terminator(Terminator::Any(b'\n'));
         let rdr = rb.build();
 
         let schema_col_names = schema
