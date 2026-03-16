@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "tenants": [
+    {
+      "tenantId": "finance-default",
+      "runtime": {
+        "profile": "strict",
+        "estimate": true,
+        "maxFileBytes": 104857600,
+        "maxRowsEstimate": 1000000,
+        "maxColumns": 200,
+        "timeoutMs": 120000
+      }
+    },
+    {
+      "tenantId": "ops-default",
+      "runtime": {
+        "profile": "balanced",
+        "estimate": true,
+        "maxFileBytes": 209715200,
+        "maxRowsEstimate": 2000000,
+        "maxColumns": 400,
+        "timeoutMs": 180000
+      }
+    },
+    {
+      "tenantId": "fast-self-serve",
+      "runtime": {
+        "profile": "fast",
+        "estimate": false,
+        "maxFileBytes": 52428800,
+        "maxRowsEstimate": 500000,
+        "maxColumns": 100,
+        "timeoutMs": 60000
+      }
+    }
+  ]
+}

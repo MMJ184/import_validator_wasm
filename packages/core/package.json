@@ -17,6 +17,10 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build:wasm": "node scripts/build-wasm.mjs",
-    "build": "pnpm run build:wasm && tsc -p tsconfig.json && node scripts/copy-wasm.mjs"
+    "build:wasm:fast": "node scripts/build-wasm.mjs",
+    "build:wasm:full": "WASM_FEATURES=pattern node scripts/build-wasm.mjs",
+    "build:pkg": "rimraf dist && tsc -p tsconfig.json && node scripts/copy-wasm.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "pnpm run build:wasm && rimraf dist && tsc -p tsconfig.json && node scripts/copy-wasm.mjs"
   }
 }

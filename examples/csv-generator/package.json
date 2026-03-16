@@ -1,6 +1,14 @@
 {
+  "name": "csv-generator",
+  "private": true,
   "scripts": {
-    "example:csv": "ts-node generate.ts"
+    "example:csv": "ts-node generate.ts",
+    "example:xlsx": "ts-node generate.ts --format=xlsx --overwrite",
+    "example:xlsx:large": "ts-node generate.ts --format=xlsx --sizes=25000,50000,100000 --overwrite",
+    "example:both:small": "ts-node generate.ts --format=both --sizes=100,1000,10000 --overwrite",
+    "example:csv:large": "ts-node generate.ts --preset=large --overwrite",
+    "example:csv:all": "ts-node generate.ts --preset=all --overwrite",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
     "ts-node": "^10.9.2",

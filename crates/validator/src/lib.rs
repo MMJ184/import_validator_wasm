@@ -8,8 +8,11 @@ use schema::{ColumnType, DateFormat, Progress, Schema};
 use csv_core::{ReadRecordResult, Reader, ReaderBuilder, Terminator};
 use rust_decimal::Decimal;
 use rust_decimal::RoundingStrategy;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::str;
 use wasm_bindgen::prelude::*;
+#[cfg(feature = "pattern")]
+use regex::Regex;
 
 #[wasm_bindgen]
 pub struct ValidatorEngine {
@@ -31,6 +34,8 @@ pub struct ValidatorEngine {
 
     // For JS: column names in schema order
     schema_col_names: Vec<String>,
+    // Fast header mapping: schema column name -> schema index
+    schema_name_to_index: HashMap<String, usize>,
 
     // For JS: input (CSV) header names in input order (only when has_headers=true)
     input_header_names: Vec<String>,
@@ -39,7 +44,7 @@ pub struct ValidatorEngine {
     data_row: u32,
 
     // Errors collected (drained to JS)
-    errors: Vec<PackedError>,
+    errors: VecDeque<PackedError>,
     max_errors: u32,
 
     // Normalized output (optional, drained to JS)
@@ -49,6 +54,13 @@ pub struct ValidatorEngine {
 
     // Per-record reusable starts buffer: starts[i] is start offset for field i
     starts: Vec<usize>,
+
+    // Optional allowed-value set per schema column (for O(1) membership checks)
+    allowed_sets: Vec<Option<HashSet<String>>>,
+
+    // Precompiled regex patterns by schema column index (only in full/pattern build)
+    #[cfg(feature = "pattern")]
+    patterns: Vec<Option<Regex>>,
 }
 
 #[wasm_bindgen]
@@ -65,6 +77,36 @@ impl ValidatorEngine {
         let schema: Schema = serde_json::from_str(schema_json)
             .map_err(|e| JsValue::from_str(&format!("Invalid schema JSON: {e}")))?;
 
+        #[cfg(feature = "pattern")]
+        let mut patterns = Vec::with_capacity(schema.columns.len());
+        for (i, c) in schema.columns.iter().enumerate() {
+            if let Some(p) = c.pattern.as_ref() {
+                if p.len() > 256 {
+                    return Err(JsValue::from_str(&format!(
+                        "Pattern too long in schema column {} ({}). Max 256 chars.",
+                        i, c.name
+                    )));
+                }
+                #[cfg(feature = "pattern")]
+                {
+                    let re = Regex::new(p).map_err(|e| {
+                        JsValue::from_str(&format!("Invalid regex in schema column {} ({}): {e}", i, c.name))
+                    })?;
+                    patterns.push(Some(re));
+                }
+                #[cfg(not(feature = "pattern"))]
+                {
+                    return Err(JsValue::from_str(&format!(
+                        "Pattern validation requested in column {} ({}), but this build disables pattern feature for maximum performance.",
+                        i, c.name
+                    )));
+                }
+            } else {
+                #[cfg(feature = "pattern")]
+                patterns.push(None);
+            }
+        }
+
         let mut rb = ReaderBuilder::new();
         rb.delimiter(schema.delimiter);
         rb.terminator(Terminator::Any(b'\n'));
@@ -74,6 +116,23 @@ impl ValidatorEngine {
             .columns
             .iter()
             .map(|c| c.name.clone())
+            .collect::<Vec<_>>();
+        let schema_name_to_index = schema
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.name.clone(), i))
+            .collect::<HashMap<_, _>>();
+        let allowed_sets = schema
+            .columns
+            .iter()
+            .map(|c| {
+                if c.allowed.is_empty() {
+                    None
+                } else {
+                    Some(c.allowed.iter().cloned().collect::<HashSet<_>>())
+                }
+            })
             .collect::<Vec<_>>();
 
         // If no headers, we consider header already "parsed" and schema_to_input is identity
@@ -93,14 +152,18 @@ impl ValidatorEngine {
             input_to_schema: Vec::new(),
             schema_to_input,
             schema_col_names,
+            schema_name_to_index,
             input_header_names: Vec::new(),
             data_row: 0,
-            errors: Vec::new(),
+            errors: VecDeque::new(),
             max_errors,
             emit_normalized,
             normalized: Vec::with_capacity(256 * 1024),
             normalized_buf_limit: 2 * 1024 * 1024, // drain frequently
             starts: Vec::with_capacity(256),
+            allowed_sets,
+            #[cfg(feature = "pattern")]
+            patterns,
         })
     }
 
@@ -124,7 +187,7 @@ impl ValidatorEngine {
             done: final_chunk,
         };
 
-        JsValue::from_str(&serde_json::to_string(&prog).unwrap())
+        serde_wasm_bindgen::to_value(&prog).unwrap_or(JsValue::NULL)
     }
 
     /// Drain up to `max` packed errors.
@@ -132,10 +195,12 @@ impl ValidatorEngine {
     pub fn take_errors_packed(&mut self, max: u32) -> Vec<u32> {
         let n = (max as usize).min(self.errors.len());
         let mut out = Vec::with_capacity(n * 2);
-        for e in self.errors.drain(0..n) {
-            let [w0, w1] = e.to_words();
-            out.push(w0);
-            out.push(w1);
+        for _ in 0..n {
+            if let Some(e) = self.errors.pop_front() {
+                let [w0, w1] = e.to_words();
+                out.push(w0);
+                out.push(w1);
+            }
         }
         out
     }
@@ -166,6 +231,11 @@ impl ValidatorEngine {
             5 => "InvalidUtf8",
             6 => "MissingRequiredColumn",
             7 => "ExtraColumn",
+            8 => "MinLengthNotMet",
+            9 => "InvalidEmail",
+            10 => "PatternMismatch",
+            11 => "PrecisionExceeded",
+            12 => "ColumnCountMismatch",
             _ => "Unknown",
         }
         .to_string()
@@ -255,6 +325,17 @@ impl ValidatorEngine {
         // Data row
         self.data_row = self.data_row.saturating_add(1);
 
+        if let Some(total) = self.schema.total_columns {
+            if ends.len() != total {
+                self.push_err(
+                    self.data_row,
+                    0,
+                    ErrorCode::ColumnCountMismatch,
+                    ColKind::Input,
+                );
+            }
+        }
+
         self.starts.clear();
         self.starts.reserve(ends.len());
 
@@ -262,7 +343,15 @@ impl ValidatorEngine {
 
         for (input_col, &end) in ends.iter().enumerate() {
             self.starts.push(start);
-            let field = &record[start..end];
+            let Some(field) = record.get(start..end) else {
+                self.push_err(
+                    self.data_row,
+                    input_col as u32,
+                    ErrorCode::InvalidType,
+                    ColKind::Input,
+                );
+                return;
+            };
             start = end;
 
             let schema_idx_opt = if self.schema.has_headers {
@@ -321,7 +410,10 @@ impl ValidatorEngine {
         let mut input_names: Vec<String> = Vec::with_capacity(ends.len());
 
         for (i, &end) in ends.iter().enumerate() {
-            let mut field = &record[start..end];
+            let Some(mut field) = record.get(start..end) else {
+                self.push_err(0, i as u32, ErrorCode::InvalidType, ColKind::Input);
+                return;
+            };
             start = end;
 
             // Strip UTF-8 BOM on first header field if present
@@ -343,53 +435,66 @@ impl ValidatorEngine {
         // Store input header names for JS/UI
         self.input_header_names = input_names.clone();
 
+        if let Some(total) = self.schema.total_columns {
+            if input_names.len() != total {
+                self.push_err(0, 0, ErrorCode::ColumnCountMismatch, ColKind::Input);
+            }
+        }
+
         // Build mappings
         self.input_to_schema = vec![None; input_names.len()];
         self.schema_to_input = vec![None; self.schema.columns.len()];
 
         for (input_i, nm) in input_names.iter().enumerate() {
-            if let Some(schema_idx) = self.schema.columns.iter().position(|c| c.name == *nm) {
+            if let Some(schema_idx) = self.schema_name_to_index.get(nm).copied() {
                 self.input_to_schema[input_i] = Some(schema_idx);
                 self.schema_to_input[schema_idx] = Some(input_i);
             }
         }
 
         // Ensure required columns exist
-        let mut missing: Vec<usize> = Vec::new();
-        for (schema_idx, col) in self.schema.columns.iter().enumerate() {
-            if col.required {
-                let exists = input_names.iter().any(|n| n == &col.name);
-                if !exists {
-                    missing.push(schema_idx);
-                }
+        for schema_idx in 0..self.schema.columns.len() {
+            let required = self.schema.columns[schema_idx].required;
+            if required && self.schema_to_input.get(schema_idx).copied().flatten().is_none() {
+                self.push_err(
+                    0,
+                    schema_idx as u32,
+                    ErrorCode::MissingRequiredColumn,
+                    ColKind::Schema,
+                );
             }
-        }
-        for schema_idx in missing {
-            self.push_err(
-                0,
-                schema_idx as u32,
-                ErrorCode::MissingRequiredColumn,
-                ColKind::Schema,
-            );
         }
     }
 
     fn validate_field(&mut self, schema_idx: usize, raw: &[u8]) {
         let trimmed = trim_ascii(raw);
+        let col = &self.schema.columns[schema_idx];
 
-        let required = self.schema.columns[schema_idx].required;
-        if required && trimmed.is_empty() {
-            self.push_err(
-                self.data_row,
-                schema_idx as u32,
-                ErrorCode::MissingRequired,
-                ColKind::Schema,
-            );
+        if trimmed.is_empty() {
+            if col.required && !col.nullable {
+                self.push_err(
+                    self.data_row,
+                    schema_idx as u32,
+                    ErrorCode::MissingRequired,
+                    ColKind::Schema,
+                );
+            }
             return;
         }
 
-        let max_len = self.schema.columns[schema_idx].max_len;
-        if let Some(max_len) = max_len {
+        if let Some(min_len) = col.min_len {
+            if trimmed.len() < min_len {
+                self.push_err(
+                    self.data_row,
+                    schema_idx as u32,
+                    ErrorCode::MinLengthNotMet,
+                    ColKind::Schema,
+                );
+                return;
+            }
+        }
+
+        if let Some(max_len) = col.max_len {
             if trimmed.len() > max_len {
                 self.push_err(
                     self.data_row,
@@ -414,23 +519,32 @@ impl ValidatorEngine {
             }
         };
 
-        // Allowed values check (scoped borrow)
-        let not_allowed = {
-            let allowed = &self.schema.columns[schema_idx].allowed;
-            !allowed.is_empty() && !allowed.iter().any(|a| a == s)
-        };
-        if not_allowed {
-            self.push_err(
-                self.data_row,
-                schema_idx as u32,
-                ErrorCode::NotAllowed,
-                ColKind::Schema,
-            );
-            return;
+        if let Some(allowed) = self.allowed_sets.get(schema_idx).and_then(|x| x.as_ref()) {
+            if !allowed.contains(s) {
+                self.push_err(
+                    self.data_row,
+                    schema_idx as u32,
+                    ErrorCode::NotAllowed,
+                    ColKind::Schema,
+                );
+                return;
+            }
         }
 
-        let col_type = self.schema.columns[schema_idx].col_type;
-        match col_type {
+        #[cfg(feature = "pattern")]
+        if let Some(re) = self.patterns[schema_idx].as_ref() {
+            if !re.is_match(s) {
+                self.push_err(
+                    self.data_row,
+                    schema_idx as u32,
+                    ErrorCode::PatternMismatch,
+                    ColKind::Schema,
+                );
+                return;
+            }
+        }
+
+        match col.col_type {
             ColumnType::String => {}
             ColumnType::Int => {
                 if !is_valid_int(s) {
@@ -442,9 +556,8 @@ impl ValidatorEngine {
                     );
                 }
             }
-            ColumnType::Decimal => {
-                let precision = self.schema.columns[schema_idx].precision.unwrap_or(2);
-                if !is_valid_decimal(s, precision) {
+            ColumnType::Float => {
+                if !is_valid_float(s) {
                     self.push_err(
                         self.data_row,
                         schema_idx as u32,
@@ -453,10 +566,60 @@ impl ValidatorEngine {
                     );
                 }
             }
+            ColumnType::Double => {
+                if !is_valid_double(s) {
+                    self.push_err(
+                        self.data_row,
+                        schema_idx as u32,
+                        ErrorCode::InvalidType,
+                        ColKind::Schema,
+                    );
+                }
+            }
+            ColumnType::Number => {
+                if !is_valid_number(s) {
+                    self.push_err(
+                        self.data_row,
+                        schema_idx as u32,
+                        ErrorCode::InvalidType,
+                        ColKind::Schema,
+                    );
+                }
+            }
+            ColumnType::Decimal => {
+                let precision = col.precision.unwrap_or(2);
+                let strict = col.strict_precision;
+
+                if !is_valid_decimal(s, precision) {
+                    self.push_err(
+                        self.data_row,
+                        schema_idx as u32,
+                        ErrorCode::InvalidType,
+                        ColKind::Schema,
+                    );
+                    return;
+                }
+                if strict && !has_exact_decimal_scale(s, precision) {
+                    self.push_err(
+                        self.data_row,
+                        schema_idx as u32,
+                        ErrorCode::PrecisionExceeded,
+                        ColKind::Schema,
+                    );
+                }
+            }
+            ColumnType::Email => {
+                if !is_valid_email(s) {
+                    self.push_err(
+                        self.data_row,
+                        schema_idx as u32,
+                        ErrorCode::InvalidEmail,
+                        ColKind::Schema,
+                    );
+                }
+            }
             ColumnType::Date => {
-                let fmt = self.schema.columns[schema_idx]
-                    .date_format
-                    .unwrap_or(DateFormat::YmdDash);
+                let fmt = col.date_format.unwrap_or(DateFormat::YmdDash);
                 if !is_valid_date(s, fmt) {
                     self.push_err(
                         self.data_row,
@@ -473,7 +636,7 @@ impl ValidatorEngine {
         let cols_len = self.schema.columns.len();
 
         for schema_i in 0..cols_len {
-            let col = self.schema.columns[schema_i].clone();
+            let col = &self.schema.columns[schema_i];
 
             let input_i_opt = if self.schema.has_headers {
                 self.schema_to_input.get(schema_i).copied().flatten()
@@ -483,7 +646,9 @@ impl ValidatorEngine {
 
             let field_bytes: &[u8] = if let Some(input_i) = input_i_opt {
                 if input_i < ends.len() && input_i < self.starts.len() {
-                    &record[self.starts[input_i]..ends[input_i]]
+                    record
+                        .get(self.starts[input_i]..ends[input_i])
+                        .unwrap_or(b"")
                 } else {
                     b""
                 }
@@ -492,7 +657,7 @@ impl ValidatorEngine {
             };
 
             let trimmed = trim_ascii(field_bytes);
-            let normalized = self.normalize_for_output(&col, trimmed);
+            let normalized = self.normalize_for_output(col, trimmed);
 
             self.write_csv_field(&normalized);
 
@@ -517,6 +682,10 @@ impl ValidatorEngine {
         match col.col_type {
             ColumnType::String => s.as_bytes().to_vec(),
             ColumnType::Int => s.as_bytes().to_vec(),
+            ColumnType::Float => s.as_bytes().to_vec(),
+            ColumnType::Double => s.as_bytes().to_vec(),
+            ColumnType::Number => s.as_bytes().to_vec(),
+            ColumnType::Email => s.as_bytes().to_vec(),
             ColumnType::Decimal => {
                 let precision = col.precision.unwrap_or(2);
                 normalize_decimal(s, precision)
@@ -555,7 +724,7 @@ impl ValidatorEngine {
         if (self.errors.len() as u32) >= self.max_errors {
             return;
         }
-        self.errors.push(PackedError { row, col, code, kind });
+        self.errors.push_back(PackedError { row, col, code, kind });
     }
 
     fn hit_error_limit(&self) -> bool {
@@ -596,6 +765,24 @@ fn is_valid_int(s: &str) -> bool {
     bs[i..].iter().all(|c| c.is_ascii_digit())
 }
 
+fn is_valid_float(s: &str) -> bool {
+    match s.parse::<f32>() {
+        Ok(v) => v.is_finite(),
+        Err(_) => false,
+    }
+}
+
+fn is_valid_double(s: &str) -> bool {
+    match s.parse::<f64>() {
+        Ok(v) => v.is_finite(),
+        Err(_) => false,
+    }
+}
+
+fn is_valid_number(s: &str) -> bool {
+    is_valid_int(s) || is_valid_double(s)
+}
+
 fn is_valid_decimal(s: &str, precision: u32) -> bool {
     if s.contains(',') {
         return false;
@@ -604,10 +791,24 @@ fn is_valid_decimal(s: &str, precision: u32) -> bool {
         Ok(v) => v,
         Err(_) => return false,
     };
+    if d.scale() > precision {
+        return false;
+    }
     let rounded = d.round_dp_with_strategy(precision, RoundingStrategy::MidpointAwayFromZero);
     let mut fixed = rounded;
     fixed.rescale(precision);
     true
+}
+
+fn has_exact_decimal_scale(s: &str, precision: u32) -> bool {
+    if s.contains(',') {
+        return false;
+    }
+    let d = match Decimal::from_str_exact(s) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    d.scale() == precision
 }
 
 fn normalize_decimal(s: &str, precision: u32) -> Option<String> {
@@ -619,6 +820,30 @@ fn normalize_decimal(s: &str, precision: u32) -> Option<String> {
     let mut fixed = rounded;
     fixed.rescale(precision);
     Some(fixed.to_string())
+}
+
+fn is_valid_email(s: &str) -> bool {
+    let at = match s.find('@') {
+        Some(i) => i,
+        None => return false,
+    };
+    if at == 0 || at + 1 >= s.len() {
+        return false;
+    }
+
+    let local = &s[..at];
+    let domain = &s[at + 1..];
+    if local.is_empty() || domain.is_empty() {
+        return false;
+    }
+    if !domain.contains('.') {
+        return false;
+    }
+    if domain.starts_with('.') || domain.ends_with('.') {
+        return false;
+    }
+
+    true
 }
 
 fn is_valid_date(s: &str, fmt: DateFormat) -> bool {

@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://import-validator.local/validation-config.schema.json",
+  "title": "Import Validator Config",
+  "type": "object",
+  "required": ["schemaVersion", "schema"],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1, "maximum": 1 },
+    "schema": {
+      "type": "object",
+      "required": ["hasHeaders", "columns"],
+      "properties": {
+        "hasHeaders": { "type": "boolean" },
+        "delimiter": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0, "maximum": 255 },
+            { "type": "string", "minLength": 1, "maxLength": 1 }
+          ]
+        },
+        "failOnExtraColumns": { "type": "boolean" },
+        "totalColumns": { "type": "integer", "minimum": 1 },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "type"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "type": {
+                "type": "string",
+                "enum": ["string", "int", "decimal", "float", "double", "number", "email", "date"]
+              },
+              "required": { "type": "boolean" },
+              "nullable": { "type": "boolean" },
+              "minLen": { "type": "integer", "minimum": 0 },
+              "maxLen": { "type": "integer", "minimum": 0 },
+              "allowed": { "type": "array", "items": { "type": "string" } },
+              "precision": { "type": "integer", "minimum": 0 },
+              "strictPrecision": { "type": "boolean" },
+              "dateFormat": { "type": "string", "enum": ["ymd-dash", "dmy-slash", "mdy-slash"] },
+              "pattern": { "type": "string", "minLength": 1, "maxLength": 256 }
+            }
+          }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "profile": { "type": "string", "enum": ["fast", "balanced", "strict"] },
+        "estimate": { "type": "boolean" },
+        "estimateOnly": { "type": "boolean" },
+        "format": { "type": "string", "enum": ["auto", "csv", "excel"] },
+        "chunkSize": { "type": "integer", "minimum": 1 },
+        "estimateChunkSize": { "type": "integer", "minimum": 1 },
+        "maxErrorRowsToShow": { "type": "integer", "minimum": 1 },
+        "dryRunRows": { "type": "integer", "minimum": 1 },
+        "maxFileBytes": { "type": "integer", "minimum": 1 },
+        "maxRowsEstimate": { "type": "integer", "minimum": 1 },
+        "maxColumns": { "type": "integer", "minimum": 1 },
+        "timeoutMs": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

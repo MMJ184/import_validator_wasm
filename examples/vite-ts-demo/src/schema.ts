@@ -1,12 +1,37 @@
 export const demoSchema = {
     hasHeaders: true,
     delimiter: ",",
-    failOnExtraColumns: false, // since we model all columns anyway, can be true too
+    failOnExtraColumns: true,
+    totalColumns: 29,
     columns: [
-        { name: "id", required: true, type: "int" },
-        { name: "amount", required: true, type: "decimal", precision: 2 },
-        { name: "date", required: true, type: "date", dateFormat: "ymd-dash" },
-        { name: "status", required: true, type: "string", allowed: ["OPEN", "CLOSED"] },
-        { name: "note", required: false, type: "string", maxLen: 200 }
+        { name: "customerId", required: true, nullable: false, type: "int" },
+        { name: "idNumber", required: true, nullable: false, type: "int" },
+        { name: "firstName", required: true, nullable: false, type: "string", minLen: 2, maxLen: 40 },
+        { name: "middleName", required: false, nullable: true, type: "string", maxLen: 40 },
+        { name: "lastName", required: true, nullable: false, type: "string", minLen: 2, maxLen: 40 },
+        { name: "surname", required: false, nullable: true, type: "string", maxLen: 40 },
+        { name: "email", required: true, nullable: false, type: "email", maxLen: 120 },
+        { name: "alternateEmail", required: false, nullable: true, type: "email", maxLen: 120 },
+        { name: "phoneNumber", required: true, nullable: false, type: "string", minLen: 10, maxLen: 15 },
+        { name: "alternatePhone", required: false, nullable: true, type: "string", minLen: 10, maxLen: 15 },
+        { name: "addressLine1", required: true, nullable: false, type: "string", minLen: 5, maxLen: 160 },
+        { name: "addressLine2", required: false, nullable: true, type: "string", maxLen: 160 },
+        { name: "city", required: true, nullable: false, type: "string", allowed: ["MUMBAI", "DELHI", "BENGALURU", "CHENNAI"] },
+        { name: "state", required: true, nullable: false, type: "string", allowed: ["MAHARASHTRA", "DELHI", "KARNATAKA", "TAMIL_NADU"] },
+        { name: "postalCode", required: true, nullable: false, type: "string", minLen: 6, maxLen: 6 },
+        { name: "countryCode", required: true, nullable: false, type: "string", allowed: ["IN", "US", "AE"] },
+        { name: "gender", required: true, nullable: false, type: "string", allowed: ["MALE", "FEMALE", "OTHER"] },
+        { name: "kycVerified", required: true, nullable: false, type: "string", allowed: ["YES", "NO"] },
+        { name: "customerTier", required: true, nullable: false, type: "string", allowed: ["BRONZE", "SILVER", "GOLD", "PLATINUM"] },
+        { name: "amount", required: true, nullable: false, type: "decimal", precision: 2, strictPrecision: true },
+        { name: "taxAmount", required: true, nullable: false, type: "decimal", precision: 2, strictPrecision: true },
+        { name: "discountRate", required: true, nullable: false, type: "double" },
+        { name: "creditScore", required: true, nullable: false, type: "number" },
+        { name: "dateOfBirth", required: true, nullable: false, type: "date", dateFormat: "ymd-dash" },
+        { name: "joiningDate", required: true, nullable: false, type: "date", dateFormat: "ymd-dash" },
+        { name: "lastLoginDate", required: true, nullable: false, type: "date", dateFormat: "ymd-dash" },
+        { name: "accountStatus", required: true, nullable: false, type: "string", allowed: ["ACTIVE", "INACTIVE", "PENDING"] },
+        { name: "preferredLanguage", required: true, nullable: false, type: "string", allowed: ["EN", "HI", "TA"] },
+        { name: "notes", required: false, nullable: true, type: "string", maxLen: 200 }
     ]
 };

@@ -86,6 +86,8 @@ coverage/
 ####################################
 packages/**/dist/
 packages/**/build/
+artifacts/build-traces/
+artifacts/customer-kit/
 
 ####################################
 # Test artifacts

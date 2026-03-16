@@ -30,6 +30,7 @@ where
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct Schema {
     pub has_headers: bool,
@@ -42,9 +43,13 @@ pub struct Schema {
 
     #[serde(default)]
     pub fail_on_extra_columns: bool,
+
+    #[serde(default)]
+    pub total_columns: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnSpec {
     pub name: String,
@@ -52,11 +57,17 @@ pub struct ColumnSpec {
     #[serde(default)]
     pub required: bool,
 
+    #[serde(default)]
+    pub nullable: bool,
+
     #[serde(rename = "type")]
     pub col_type: ColumnType,
 
     #[serde(default)]
     pub max_len: Option<usize>,
+
+    #[serde(default)]
+    pub min_len: Option<usize>,
 
     #[serde(default)]
     pub allowed: Vec<String>,
@@ -66,6 +77,12 @@ pub struct ColumnSpec {
 
     #[serde(default)]
     pub date_format: Option<DateFormat>,
+
+    #[serde(default)]
+    pub pattern: Option<String>,
+
+    #[serde(default)]
+    pub strict_precision: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -74,6 +91,10 @@ pub enum ColumnType {
     String,
     Int,
     Decimal,
+    Float,
+    Double,
+    Number,
+    Email,
     Date,
 }
 

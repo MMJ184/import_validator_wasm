@@ -6,30 +6,65 @@
     <title>Import Validator Demo (Vite)</title>
 </head>
 <body>
-<div id="app">
-    <h1>CSV Validator (WASM + Worker)</h1>
+<div class="bg-shape bg-shape-a"></div>
+<div class="bg-shape bg-shape-b"></div>
 
-    <div class="card">
-        <label>Pick CSV file:</label>
-        <input id="file" type="file" accept=".csv,text/csv" />
-        <button id="run">Validate</button>
-    </div>
+<main id="app" class="shell">
+    <header class="hero">
+        <p class="eyebrow">Import Validator</p>
+        <h1>WASM Validation Console</h1>
+        <p class="hero-copy">
+            Validate uploads with streaming performance and clear runtime diagnostics.
+        </p>
+    </header>
 
-    <div class="card">
-        <h3>Status</h3>
-        <pre id="status">Idle</pre>
-    </div>
+    <section class="grid">
+        <div class="card card-controls">
+            <h2>Run Validation</h2>
+            <label class="field-label" for="file">CSV / Excel File</label>
+            <input id="file" type="file" accept=".csv,text/csv,.xlsx,.xls" />
 
-    <div class="card">
-        <h3>Errors</h3>
-        <pre id="errors">(none)</pre>
-    </div>
+            <label class="checkbox-row">
+                <input id="estimate" type="checkbox" />
+                Estimate before validate
+            </label>
 
-    <div class="card">
-        <h3>Normalized output (first chunks)</h3>
-        <pre id="normalized">(disabled)</pre>
-    </div>
-</div>
+            <label class="checkbox-row">
+                <input id="estimateOnly" type="checkbox" />
+                Estimate only (skip validation)
+            </label>
+
+            <label class="field-label" for="format">Validation Route</label>
+            <select id="format">
+                <option value="auto" selected>Auto (by file extension)</option>
+                <option value="csv">CSV route</option>
+                <option value="excel">Excel route (.xlsx)</option>
+            </select>
+
+            <p class="help-note">
+                Sample files: <code>demo_100.csv</code>, <code>demo_10000.csv</code>,
+                <code>demo_100.xlsx</code>, <code>demo_10000.xlsx</code>
+            </p>
+
+            <button id="run" type="button">Validate File</button>
+        </div>
+
+        <div class="card">
+            <h2>Status</h2>
+            <pre id="status">Idle</pre>
+        </div>
+
+        <div class="card">
+            <h2>Metrics</h2>
+            <pre id="metrics">(none)</pre>
+        </div>
+
+        <div class="card card-errors">
+            <h2>Errors</h2>
+            <pre id="errors">(none)</pre>
+        </div>
+    </section>
+</main>
 
 <script type="module" src="/src/main.ts"></script>
 </body>

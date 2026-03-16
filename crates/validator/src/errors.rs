@@ -11,20 +11,12 @@ pub enum ErrorCode {
     InvalidUtf8 = 5,
     MissingRequiredColumn = 6,
     ExtraColumn = 7,
-}
-
-impl ErrorCode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ErrorCode::MissingRequired => "MissingRequired",
-            ErrorCode::InvalidType => "InvalidType",
-            ErrorCode::MaxLengthExceeded => "MaxLengthExceeded",
-            ErrorCode::NotAllowed => "NotAllowed",
-            ErrorCode::InvalidUtf8 => "InvalidUtf8",
-            ErrorCode::MissingRequiredColumn => "MissingRequiredColumn",
-            ErrorCode::ExtraColumn => "ExtraColumn",
-        }
-    }
+    MinLengthNotMet = 8,
+    InvalidEmail = 9,
+    #[cfg(feature = "pattern")]
+    PatternMismatch = 10,
+    PrecisionExceeded = 11,
+    ColumnCountMismatch = 12,
 }
 
 #[repr(u8)]
