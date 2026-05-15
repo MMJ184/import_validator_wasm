@@ -1,70 +1,212 @@
 <!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Import Validator Demo (Vite)</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Import Validator · WASM Demo</title>
 </head>
 <body>
-<div class="bg-shape bg-shape-a"></div>
-<div class="bg-shape bg-shape-b"></div>
+<div id="root">
 
-<main id="app" class="shell">
-    <header class="hero">
-        <p class="eyebrow">Import Validator</p>
-        <h1>WASM Validation Console</h1>
-        <p class="hero-copy">
-            Validate uploads with streaming performance and clear runtime diagnostics.
-        </p>
-    </header>
+  <nav class="topbar">
+    <div class="topbar-left">
+      <div class="topbar-logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/>
+        </svg>
+      </div>
+      <span class="topbar-name">Import Validator</span>
+      <span class="topbar-pill">WASM</span>
+    </div>
+    <span class="topbar-tagline">CSV &amp; Excel · Rust-powered</span>
+  </nav>
 
-    <section class="grid">
-        <div class="card card-controls">
-            <h2>Run Validation</h2>
-            <label class="field-label" for="file">CSV / Excel File</label>
+  <div class="layout">
+
+    <!-- ── Sidebar: controls ── -->
+    <aside class="sidebar">
+      <div class="scroll-area">
+
+        <div class="sidebar-section">
+          <p class="section-label">File</p>
+
+          <label id="uploadZone" class="upload-zone" for="file">
+            <svg class="upload-icon" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <span class="upload-text">Drop CSV or Excel file</span>
+            <span class="upload-sub">or click to browse</span>
             <input id="file" type="file" accept=".csv,text/csv,.xlsx,.xls" />
+          </label>
 
-            <label class="checkbox-row">
-                <input id="estimate" type="checkbox" />
-                Estimate before validate
+          <div id="fileName" class="file-badge hidden">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+            </svg>
+            <span id="fileNameText"></span>
+          </div>
+        </div>
+
+        <div class="sidebar-section">
+          <p class="section-label">Options</p>
+
+          <div class="field">
+            <label class="field-label" for="format">Validation route</label>
+            <div class="select-wrap">
+              <select id="format">
+                <option value="auto" selected>Auto-detect</option>
+                <option value="csv">Force CSV</option>
+                <option value="excel">Force Excel</option>
+              </select>
+              <svg class="select-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+            </div>
+          </div>
+
+          <div class="toggles">
+            <label class="toggle">
+              <input id="estimate" type="checkbox" />
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              <span class="toggle-text">Estimate before validate</span>
             </label>
-
-            <label class="checkbox-row">
-                <input id="estimateOnly" type="checkbox" />
-                Estimate only (skip validation)
+            <label class="toggle">
+              <input id="estimateOnly" type="checkbox" />
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+              <span class="toggle-text">Estimate only (skip validation)</span>
             </label>
-
-            <label class="field-label" for="format">Validation Route</label>
-            <select id="format">
-                <option value="auto" selected>Auto (by file extension)</option>
-                <option value="csv">CSV route</option>
-                <option value="excel">Excel route (.xlsx)</option>
-            </select>
-
-            <p class="help-note">
-                Sample files: <code>demo_100.csv</code>, <code>demo_10000.csv</code>,
-                <code>demo_100.xlsx</code>, <code>demo_10000.xlsx</code>
-            </p>
-
-            <button id="run" type="button">Validate File</button>
+          </div>
         </div>
 
-        <div class="card">
-            <h2>Status</h2>
-            <pre id="status">Idle</pre>
+        <div class="sidebar-section">
+          <details class="accordion">
+            <summary class="accordion-hd">
+              <span>Modifiers</span>
+              <svg class="accordion-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+            </summary>
+            <div class="accordion-body">
+
+              <div class="toggles">
+                <label class="toggle">
+                  <input id="modTrimCollapse" type="checkbox" checked />
+                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                  <span class="toggle-text">Trim + collapse whitespace</span>
+                </label>
+                <label class="toggle">
+                  <input id="modTitleCase" type="checkbox" checked />
+                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                  <span class="toggle-text">Title-case names</span>
+                </label>
+                <label class="toggle">
+                  <input id="modEmailLowercase" type="checkbox" checked />
+                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                  <span class="toggle-text">Lowercase email</span>
+                </label>
+                <label class="toggle">
+                  <input id="modUnique" type="checkbox" checked />
+                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                  <span class="toggle-text">Unique checks</span>
+                </label>
+                <label class="toggle">
+                  <input id="modCompositeUnique" type="checkbox" checked />
+                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                  <span class="toggle-text">Composite uniqueness</span>
+                </label>
+              </div>
+
+              <div class="field-pair">
+                <div class="field">
+                  <label class="field-label" for="namePrefix">Name prefix</label>
+                  <input id="namePrefix" type="text" placeholder="e.g. Mr." />
+                </div>
+                <div class="field">
+                  <label class="field-label" for="nameSuffix">Name suffix</label>
+                  <input id="nameSuffix" type="text" placeholder="e.g. Jr." />
+                </div>
+              </div>
+
+              <div class="field">
+                <label class="field-label" for="amountScale">Amount decimal digits</label>
+                <input id="amountScale" type="number" min="0" max="8" step="1" value="2" />
+              </div>
+
+              <div class="field-pair">
+                <div class="field">
+                  <label class="field-label" for="nameSubstringStart">Substring start</label>
+                  <input id="nameSubstringStart" type="number" min="0" step="1" placeholder="—" />
+                </div>
+                <div class="field">
+                  <label class="field-label" for="nameSubstringEnd">Substring end</label>
+                  <input id="nameSubstringEnd" type="number" min="0" step="1" placeholder="—" />
+                </div>
+              </div>
+
+              <div class="field-pair">
+                <div class="field">
+                  <label class="field-label" for="nameReplaceFrom">Replace from</label>
+                  <input id="nameReplaceFrom" type="text" placeholder="e.g. 0" />
+                </div>
+                <div class="field">
+                  <label class="field-label" for="nameReplaceTo">Replace to</label>
+                  <input id="nameReplaceTo" type="text" placeholder="e.g. o" />
+                </div>
+              </div>
+
+              <div class="field">
+                <label class="field-label" for="nullTokens">Null tokens (comma-separated)</label>
+                <input id="nullTokens" type="text" placeholder="N/A, NULL, -" value="N/A,NULL,-" />
+              </div>
+
+            </div>
+          </details>
         </div>
 
-        <div class="card">
-            <h2>Metrics</h2>
-            <pre id="metrics">(none)</pre>
+      </div><!-- /scroll-area -->
+
+      <div class="sidebar-footer">
+        <button id="run" type="button">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Validate File
+        </button>
+      </div>
+    </aside>
+
+    <!-- ── Main pane: results ── -->
+    <main class="pane">
+
+      <div class="status-bar" id="statusBar" data-state="idle">
+        <span class="status-dot"></span>
+        <span id="status" class="status-text">Idle — select a file and click Validate</span>
+      </div>
+
+      <div class="pane-body">
+
+        <div class="result-card">
+          <h2 class="card-title">Metrics</h2>
+          <div id="metrics" class="metric-grid">
+            <p class="empty-hint">No data yet</p>
+          </div>
         </div>
 
-        <div class="card card-errors">
-            <h2>Errors</h2>
-            <pre id="errors">(none)</pre>
+        <div class="result-card result-card--errors">
+          <h2 class="card-title">
+            Errors
+            <span id="errorCount" class="err-count hidden"></span>
+          </h2>
+          <div id="errors" class="error-list">
+            <p class="empty-hint">No errors</p>
+          </div>
         </div>
-    </section>
-</main>
+
+      </div>
+    </main>
+
+  </div>
+</div>
 
 <script type="module" src="/src/main.ts"></script>
 </body>

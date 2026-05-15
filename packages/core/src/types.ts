@@ -23,6 +23,8 @@ export type ErrorCodeString =
     | "InvalidUtf8"
     | "MissingRequiredColumn"
     | "ExtraColumn"
+    | "DuplicateValue"
+    | "DuplicateCombination"
     | "Unknown";
 
 export type DecodedError = {

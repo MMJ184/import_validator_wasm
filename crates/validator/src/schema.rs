@@ -46,6 +46,9 @@ pub struct Schema {
 
     #[serde(default)]
     pub total_columns: Option<usize>,
+
+    #[serde(default)]
+    pub unique_groups: Vec<UniqueGroupSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -83,6 +86,116 @@ pub struct ColumnSpec {
 
     #[serde(default)]
     pub strict_precision: bool,
+
+    #[serde(default)]
+    pub unique: bool,
+
+    #[serde(default)]
+    pub modifiers: ColumnModifiers,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnModifiers {
+    #[serde(default = "default_true")]
+    pub trim: bool,
+
+    #[serde(default)]
+    pub collapse_whitespace: bool,
+
+    #[serde(default)]
+    pub title_case: bool,
+
+    #[serde(default)]
+    pub lowercase: bool,
+
+    #[serde(default)]
+    pub uppercase: bool,
+
+    #[serde(default)]
+    pub prefix: Option<String>,
+
+    #[serde(default)]
+    pub suffix: Option<String>,
+
+    #[serde(default)]
+    pub ceil: bool,
+
+    #[serde(default)]
+    pub floor: bool,
+
+    #[serde(default)]
+    pub round: bool,
+
+    #[serde(default)]
+    pub decimal_scale: Option<u32>,
+
+    #[serde(default)]
+    pub substring_start: Option<usize>,
+
+    #[serde(default)]
+    pub substring_end: Option<usize>,
+
+    #[serde(default)]
+    pub replace_from: Option<String>,
+
+    #[serde(default)]
+    pub replace_to: Option<String>,
+
+    #[serde(default)]
+    pub regex_replace_pattern: Option<String>,
+
+    #[serde(default)]
+    #[cfg_attr(not(feature = "pattern"), allow(dead_code))]
+    pub regex_replace_with: Option<String>,
+
+    #[serde(default)]
+    pub null_values: Vec<String>,
+
+    #[serde(default = "default_true")]
+    pub null_values_case_insensitive: bool,
+}
+
+impl Default for ColumnModifiers {
+    fn default() -> Self {
+        Self {
+            trim: true,
+            collapse_whitespace: false,
+            title_case: false,
+            lowercase: false,
+            uppercase: false,
+            prefix: None,
+            suffix: None,
+            ceil: false,
+            floor: false,
+            round: false,
+            decimal_scale: None,
+            substring_start: None,
+            substring_end: None,
+            replace_from: None,
+            replace_to: None,
+            regex_replace_pattern: None,
+            regex_replace_with: None,
+            null_values: Vec::new(),
+            null_values_case_insensitive: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct UniqueGroupSpec {
+    pub columns: Vec<String>,
+
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub name: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]

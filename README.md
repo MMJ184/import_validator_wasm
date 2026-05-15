@@ -43,10 +43,16 @@ Core scripts:
 
 This is used for enterprise debugging and build regression tracking.
 
-## Enterprise Docs
-- Current implementation flow: `docs/CURRENT_FLOW.md`
-- Product readiness: `docs/PRODUCT_READINESS.md`
+## Client Documentation
+- Quick start guide: `docs/CLIENT_QUICKSTART.md`
+- Schema field reference: `docs/SCHEMA_REFERENCE.md`
+- SDK API reference: `docs/SDK_API.md`
 - Customer distribution guide: `docs/CUSTOMER_DISTRIBUTION.md`
+
+## Internal Docs
+- Current implementation flow: `docs/CURRENT_FLOW.md`
+- Modifier roadmap: `docs/MODIFIER_TASKS.md`
+- Product readiness: `docs/PRODUCT_READINESS.md`
 - Validation config schema: `docs/validation-config.schema.json`
 - Tenant profile examples: `docs/customer-profiles.json`
 - Engineering standards: `docs/ENGINEERING_STANDARDS.md`

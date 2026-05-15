@@ -136,6 +136,8 @@ export class Engine {
             case 10: return "PatternMismatch";
             case 11: return "PrecisionExceeded";
             case 12: return "ColumnCountMismatch";
+            case 13: return "DuplicateValue";
+            case 14: return "DuplicateCombination";
             default: return "Unknown";
         }
     }
@@ -169,6 +171,10 @@ export class Engine {
                 return `${where}${colPart}: decimal precision exceeded`;
             case "InvalidUtf8":
                 return `${where}${colPart}: invalid text encoding`;
+            case "DuplicateValue":
+                return `${where}${colPart}: duplicate value not allowed`;
+            case "DuplicateCombination":
+                return `${where}${colPart}: duplicate combination not allowed`;
             default:
                 return `${where}${colPart}: validation error`;
         }

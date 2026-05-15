@@ -3,7 +3,7 @@ mod schema;
 mod errors;
 
 use errors::{ColKind, ErrorCode, PackedError};
-use schema::{ColumnType, DateFormat, Progress, Schema};
+use schema::{ColumnModifiers, ColumnType, DateFormat, Progress, Schema};
 
 use csv_core::{ReadRecordResult, Reader, ReaderBuilder, Terminator};
 use rust_decimal::Decimal;
@@ -58,9 +58,30 @@ pub struct ValidatorEngine {
     // Optional allowed-value set per schema column (for O(1) membership checks)
     allowed_sets: Vec<Option<HashSet<String>>>,
 
+    // Optional uniqueness set per schema column (enabled when column.unique=true)
+    unique_sets: Vec<Option<HashSet<String>>>,
+
+    // Composite uniqueness groups (row-level key across multiple columns).
+    unique_group_indices: Vec<Vec<usize>>,
+    unique_group_sets: Vec<HashSet<String>>,
+
     // Precompiled regex patterns by schema column index (only in full/pattern build)
     #[cfg(feature = "pattern")]
     patterns: Vec<Option<Regex>>,
+
+    #[cfg(feature = "pattern")]
+    regex_replace_rules: Vec<Option<(Regex, String)>>,
+
+    // Pre-allocated per-row canonical value buffer: reused each row instead of reallocating.
+    // Indexed by schema column. Cleared via fill(None) at the start of each data row.
+    row_values: Vec<Option<String>>,
+
+    // Precomputed lowercase null-token values per schema column.
+    // Built once at engine construction; avoids to_lowercase() on every field call.
+    null_values_lower: Vec<Vec<String>>,
+
+    // Scratch buffer for building composite-uniqueness keys without allocating a Vec<&str>.
+    composite_key_buf: String,
 }
 
 #[wasm_bindgen]
@@ -79,6 +100,8 @@ impl ValidatorEngine {
 
         #[cfg(feature = "pattern")]
         let mut patterns = Vec::with_capacity(schema.columns.len());
+        #[cfg(feature = "pattern")]
+        let mut regex_replace_rules = Vec::with_capacity(schema.columns.len());
         for (i, c) in schema.columns.iter().enumerate() {
             if let Some(p) = c.pattern.as_ref() {
                 if p.len() > 256 {
@@ -104,6 +127,32 @@ impl ValidatorEngine {
             } else {
                 #[cfg(feature = "pattern")]
                 patterns.push(None);
+            }
+
+            if let Some(replace_pattern) = c.modifiers.regex_replace_pattern.as_ref() {
+                #[cfg(feature = "pattern")]
+                {
+                    let re = Regex::new(replace_pattern).map_err(|e| {
+                        JsValue::from_str(&format!(
+                            "Invalid regexReplacePattern in schema column {} ({}): {e}",
+                            i,
+                            c.name
+                        ))
+                    })?;
+                    let replacement = c.modifiers.regex_replace_with.clone().unwrap_or_default();
+                    regex_replace_rules.push(Some((re, replacement)));
+                }
+                #[cfg(not(feature = "pattern"))]
+                {
+                    let _ = replace_pattern;
+                    return Err(JsValue::from_str(&format!(
+                        "regexReplacePattern requested in column {} ({}), but this build disables pattern feature.",
+                        i, c.name
+                    )));
+                }
+            } else {
+                #[cfg(feature = "pattern")]
+                regex_replace_rules.push(None);
             }
         }
 
@@ -134,6 +183,56 @@ impl ValidatorEngine {
                 }
             })
             .collect::<Vec<_>>();
+        let unique_sets = schema
+            .columns
+            .iter()
+            .map(|c| {
+                if c.unique {
+                    Some(HashSet::<String>::new())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut unique_group_indices = Vec::with_capacity(schema.unique_groups.len());
+        for (gi, group) in schema.unique_groups.iter().enumerate() {
+            if group.columns.is_empty() {
+                return Err(JsValue::from_str(&format!(
+                    "uniqueGroups[{gi}] must include at least one column."
+                )));
+            }
+
+            let mut resolved = Vec::with_capacity(group.columns.len());
+            for col_name in &group.columns {
+                let Some(idx) = schema_name_to_index.get(col_name).copied() else {
+                    return Err(JsValue::from_str(&format!(
+                        "uniqueGroups[{gi}] references unknown column \"{col_name}\""
+                    )));
+                };
+                resolved.push(idx);
+            }
+
+            unique_group_indices.push(resolved);
+        }
+        let unique_group_sets = (0..unique_group_indices.len())
+            .map(|_| HashSet::<String>::new())
+            .collect::<Vec<_>>();
+
+        // Pre-allocate per-row value scratch buffer.
+        let row_values = vec![None::<String>; schema.columns.len()];
+
+        // Precompute lowercased null token values per column to avoid per-call lowercasing.
+        let null_values_lower = schema
+            .columns
+            .iter()
+            .map(|c| {
+                if c.modifiers.null_values_case_insensitive {
+                    c.modifiers.null_values.iter().map(|v| v.to_lowercase()).collect()
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect::<Vec<Vec<String>>>();
 
         // If no headers, we consider header already "parsed" and schema_to_input is identity
         let header_parsed = !schema.has_headers;
@@ -158,12 +257,21 @@ impl ValidatorEngine {
             errors: VecDeque::new(),
             max_errors,
             emit_normalized,
-            normalized: Vec::with_capacity(256 * 1024),
+            // Only pre-allocate normalized buffer when normalization is actually enabled.
+            normalized: if emit_normalized { Vec::with_capacity(256 * 1024) } else { Vec::new() },
             normalized_buf_limit: 2 * 1024 * 1024, // drain frequently
             starts: Vec::with_capacity(256),
             allowed_sets,
+            unique_sets,
+            unique_group_indices,
+            unique_group_sets,
             #[cfg(feature = "pattern")]
             patterns,
+            #[cfg(feature = "pattern")]
+            regex_replace_rules,
+            row_values,
+            null_values_lower,
+            composite_key_buf: String::new(),
         })
     }
 
@@ -236,6 +344,8 @@ impl ValidatorEngine {
             10 => "PatternMismatch",
             11 => "PrecisionExceeded",
             12 => "ColumnCountMismatch",
+            13 => "DuplicateValue",
+            14 => "DuplicateCombination",
             _ => "Unknown",
         }
         .to_string()
@@ -338,6 +448,8 @@ impl ValidatorEngine {
 
         self.starts.clear();
         self.starts.reserve(ends.len());
+        // Clear the pre-allocated scratch buffer instead of allocating a fresh Vec every row.
+        self.row_values.iter_mut().for_each(|v| *v = None);
 
         let mut start = 0usize;
 
@@ -363,7 +475,11 @@ impl ValidatorEngine {
             };
 
             if let Some(schema_idx) = schema_idx_opt {
-                self.validate_field(schema_idx, field);
+                if let Some(canonical) = self.validate_field(schema_idx, field) {
+                    if schema_idx < self.row_values.len() {
+                        self.row_values[schema_idx] = Some(canonical);
+                    }
+                }
             } else if self.schema.fail_on_extra_columns {
                 // input column index in `col`, mark as input-kind
                 self.push_err(
@@ -399,9 +515,24 @@ impl ValidatorEngine {
             }
         }
 
-        // Emit normalized row (optional)
+        // Use mem::take so we can pass &row_vals to check_composite_uniques which
+        // needs &mut self for its HashSet inserts. No allocation: just moves the
+        // Vec pointer out and back.
+        {
+            let row_vals = std::mem::take(&mut self.row_values);
+            self.check_composite_uniques(&row_vals);
+            self.row_values = row_vals;
+        }
+        if self.hit_error_limit() {
+            return;
+        }
+
+        // Emit normalized row using already-computed canonical values — avoids
+        // calling prepare_field_value a second time for every field.
         if self.emit_normalized && self.normalized.len() < self.normalized_buf_limit {
-            self.write_normalized_row(record, ends);
+            let row_vals = std::mem::take(&mut self.row_values);
+            self.write_normalized_row(&row_vals);
+            self.row_values = row_vals;
         }
     }
 
@@ -466,47 +597,9 @@ impl ValidatorEngine {
         }
     }
 
-    fn validate_field(&mut self, schema_idx: usize, raw: &[u8]) {
-        let trimmed = trim_ascii(raw);
+    fn validate_field(&mut self, schema_idx: usize, raw: &[u8]) -> Option<String> {
         let col = &self.schema.columns[schema_idx];
-
-        if trimmed.is_empty() {
-            if col.required && !col.nullable {
-                self.push_err(
-                    self.data_row,
-                    schema_idx as u32,
-                    ErrorCode::MissingRequired,
-                    ColKind::Schema,
-                );
-            }
-            return;
-        }
-
-        if let Some(min_len) = col.min_len {
-            if trimmed.len() < min_len {
-                self.push_err(
-                    self.data_row,
-                    schema_idx as u32,
-                    ErrorCode::MinLengthNotMet,
-                    ColKind::Schema,
-                );
-                return;
-            }
-        }
-
-        if let Some(max_len) = col.max_len {
-            if trimmed.len() > max_len {
-                self.push_err(
-                    self.data_row,
-                    schema_idx as u32,
-                    ErrorCode::MaxLengthExceeded,
-                    ColKind::Schema,
-                );
-                return;
-            }
-        }
-
-        let s = match str::from_utf8(trimmed) {
+        let prepared = match self.prepare_field_value(schema_idx, raw, &col.modifiers) {
             Ok(v) => v,
             Err(_) => {
                 self.push_err(
@@ -515,151 +608,186 @@ impl ValidatorEngine {
                     ErrorCode::InvalidUtf8,
                     ColKind::Schema,
                 );
-                return;
+                return None;
             }
         };
 
+        if prepared.is_empty() {
+            if col.required && !col.nullable {
+                self.push_err(
+                    self.data_row,
+                    schema_idx as u32,
+                    ErrorCode::MissingRequired,
+                    ColKind::Schema,
+                );
+            }
+            return None;
+        }
+
+        if let Some(min_len) = col.min_len {
+            if prepared.len() < min_len {
+                self.push_err(
+                    self.data_row,
+                    schema_idx as u32,
+                    ErrorCode::MinLengthNotMet,
+                    ColKind::Schema,
+                );
+                return None;
+            }
+        }
+
+        if let Some(max_len) = col.max_len {
+            if prepared.len() > max_len {
+                self.push_err(
+                    self.data_row,
+                    schema_idx as u32,
+                    ErrorCode::MaxLengthExceeded,
+                    ColKind::Schema,
+                );
+                return None;
+            }
+        }
+
         if let Some(allowed) = self.allowed_sets.get(schema_idx).and_then(|x| x.as_ref()) {
-            if !allowed.contains(s) {
+            if !allowed.contains(prepared.as_str()) {
                 self.push_err(
                     self.data_row,
                     schema_idx as u32,
                     ErrorCode::NotAllowed,
                     ColKind::Schema,
                 );
-                return;
+                return None;
             }
         }
 
         #[cfg(feature = "pattern")]
         if let Some(re) = self.patterns[schema_idx].as_ref() {
-            if !re.is_match(s) {
+            if !re.is_match(prepared.as_str()) {
                 self.push_err(
                     self.data_row,
                     schema_idx as u32,
                     ErrorCode::PatternMismatch,
                     ColKind::Schema,
                 );
-                return;
+                return None;
             }
         }
 
-        match col.col_type {
-            ColumnType::String => {}
+        let canonical = match col.col_type {
+            ColumnType::String => prepared.clone(),
             ColumnType::Int => {
-                if !is_valid_int(s) {
+                if !is_valid_int(prepared.as_str()) {
                     self.push_err(
                         self.data_row,
                         schema_idx as u32,
                         ErrorCode::InvalidType,
                         ColKind::Schema,
                     );
+                    return None;
                 }
+                prepared.clone()
             }
             ColumnType::Float => {
-                if !is_valid_float(s) {
+                if !is_valid_float(prepared.as_str()) {
                     self.push_err(
                         self.data_row,
                         schema_idx as u32,
                         ErrorCode::InvalidType,
                         ColKind::Schema,
                     );
+                    return None;
                 }
+                prepared.clone()
             }
             ColumnType::Double => {
-                if !is_valid_double(s) {
+                if !is_valid_double(prepared.as_str()) {
                     self.push_err(
                         self.data_row,
                         schema_idx as u32,
                         ErrorCode::InvalidType,
                         ColKind::Schema,
                     );
+                    return None;
                 }
+                prepared.clone()
             }
             ColumnType::Number => {
-                if !is_valid_number(s) {
+                if !is_valid_number(prepared.as_str()) {
                     self.push_err(
                         self.data_row,
                         schema_idx as u32,
                         ErrorCode::InvalidType,
                         ColKind::Schema,
                     );
+                    return None;
                 }
+                prepared.clone()
             }
             ColumnType::Decimal => {
                 let precision = col.precision.unwrap_or(2);
                 let strict = col.strict_precision;
-
-                if !is_valid_decimal(s, precision) {
-                    self.push_err(
-                        self.data_row,
-                        schema_idx as u32,
-                        ErrorCode::InvalidType,
-                        ColKind::Schema,
-                    );
-                    return;
-                }
-                if strict && !has_exact_decimal_scale(s, precision) {
-                    self.push_err(
-                        self.data_row,
-                        schema_idx as u32,
-                        ErrorCode::PrecisionExceeded,
-                        ColKind::Schema,
-                    );
+                match validate_normalize_decimal(prepared.as_str(), precision, strict) {
+                    Ok(normalized) => normalized,
+                    Err(err_code) => {
+                        self.push_err(self.data_row, schema_idx as u32, err_code, ColKind::Schema);
+                        return None;
+                    }
                 }
             }
             ColumnType::Email => {
-                if !is_valid_email(s) {
+                if !is_valid_email(prepared.as_str()) {
                     self.push_err(
                         self.data_row,
                         schema_idx as u32,
                         ErrorCode::InvalidEmail,
                         ColKind::Schema,
                     );
+                    return None;
                 }
+                prepared.clone()
             }
             ColumnType::Date => {
                 let fmt = col.date_format.unwrap_or(DateFormat::YmdDash);
-                if !is_valid_date(s, fmt) {
+                if !is_valid_date(prepared.as_str(), fmt) {
                     self.push_err(
                         self.data_row,
                         schema_idx as u32,
                         ErrorCode::InvalidType,
                         ColKind::Schema,
                     );
+                    return None;
+                }
+                normalize_date(prepared.as_str(), fmt).unwrap_or(prepared.clone())
+            }
+        };
+
+        if col.unique {
+            if let Some(unique_set) = self.unique_sets.get_mut(schema_idx).and_then(|x| x.as_mut()) {
+                if !unique_set.insert(canonical.clone()) {
+                    self.push_err(
+                        self.data_row,
+                        schema_idx as u32,
+                        ErrorCode::DuplicateValue,
+                        ColKind::Schema,
+                    );
+                    return None;
                 }
             }
         }
+
+        Some(canonical)
     }
 
-    fn write_normalized_row(&mut self, record: &[u8], ends: &[usize]) {
+    fn write_normalized_row(&mut self, row_vals: &[Option<String>]) {
         let cols_len = self.schema.columns.len();
 
         for schema_i in 0..cols_len {
-            let col = &self.schema.columns[schema_i];
+            let s = row_vals
+                .get(schema_i)
+                .and_then(|v| v.as_deref())
+                .unwrap_or("");
 
-            let input_i_opt = if self.schema.has_headers {
-                self.schema_to_input.get(schema_i).copied().flatten()
-            } else {
-                Some(schema_i)
-            };
-
-            let field_bytes: &[u8] = if let Some(input_i) = input_i_opt {
-                if input_i < ends.len() && input_i < self.starts.len() {
-                    record
-                        .get(self.starts[input_i]..ends[input_i])
-                        .unwrap_or(b"")
-                } else {
-                    b""
-                }
-            } else {
-                b""
-            };
-
-            let trimmed = trim_ascii(field_bytes);
-            let normalized = self.normalize_for_output(col, trimmed);
-
-            self.write_csv_field(&normalized);
+            self.write_csv_field(s.as_bytes());
 
             if schema_i + 1 < cols_len {
                 self.normalized.push(self.schema.delimiter);
@@ -673,28 +801,64 @@ impl ValidatorEngine {
         }
     }
 
-    fn normalize_for_output(&self, col: &schema::ColumnSpec, trimmed: &[u8]) -> Vec<u8> {
-        let s = match str::from_utf8(trimmed) {
+    fn prepare_field_value(
+        &self,
+        schema_idx: usize,
+        raw: &[u8],
+        modifiers: &ColumnModifiers
+    ) -> Result<String, ()> {
+        let source = if modifiers.trim { trim_ascii(raw) } else { raw };
+        if source.is_empty() {
+            return Ok(String::new());
+        }
+        let input = match str::from_utf8(source) {
             Ok(v) => v,
-            Err(_) => return Vec::new(),
+            Err(_) => return Err(()),
         };
+        Ok(apply_modifiers(self, schema_idx, input, modifiers))
+    }
 
-        match col.col_type {
-            ColumnType::String => s.as_bytes().to_vec(),
-            ColumnType::Int => s.as_bytes().to_vec(),
-            ColumnType::Float => s.as_bytes().to_vec(),
-            ColumnType::Double => s.as_bytes().to_vec(),
-            ColumnType::Number => s.as_bytes().to_vec(),
-            ColumnType::Email => s.as_bytes().to_vec(),
-            ColumnType::Decimal => {
-                let precision = col.precision.unwrap_or(2);
-                normalize_decimal(s, precision)
-                    .unwrap_or_default()
-                    .into_bytes()
+    fn check_composite_uniques(&mut self, row_values: &[Option<String>]) {
+        if self.unique_group_indices.is_empty() {
+            return;
+        }
+
+        for gi in 0..self.unique_group_indices.len() {
+            let indices = &self.unique_group_indices[gi];
+            let col_for_error = indices[0];
+
+            self.composite_key_buf.clear();
+            let mut valid = true;
+
+            for (idx_pos, schema_idx) in indices.iter().copied().enumerate() {
+                let Some(value) = row_values.get(schema_idx).and_then(|v| v.as_ref()) else {
+                    valid = false;
+                    break;
+                };
+                if value.is_empty() {
+                    valid = false;
+                    break;
+                }
+                if idx_pos > 0 {
+                    self.composite_key_buf.push('\u{1f}');
+                }
+                self.composite_key_buf.push_str(value);
             }
-            ColumnType::Date => {
-                let fmt = col.date_format.unwrap_or(DateFormat::YmdDash);
-                normalize_date(s, fmt).unwrap_or_default().into_bytes()
+
+            if !valid {
+                continue;
+            }
+
+            let key = self.composite_key_buf.clone();
+            let seen = self.unique_group_sets[gi].insert(key);
+            if !seen {
+                self.push_err(
+                    self.data_row,
+                    col_for_error as u32,
+                    ErrorCode::DuplicateCombination,
+                    ColKind::Schema,
+                );
+                return;
             }
         }
     }
@@ -750,6 +914,160 @@ fn trim_ascii(mut b: &[u8]) -> &[u8] {
     b
 }
 
+fn apply_modifiers(
+    engine: &ValidatorEngine,
+    schema_idx: usize,
+    input: &str,
+    modifiers: &ColumnModifiers
+) -> String {
+    let mut out = if modifiers.collapse_whitespace {
+        collapse_whitespace(input)
+    } else {
+        input.to_string()
+    };
+
+    if modifiers.substring_start.is_some() || modifiers.substring_end.is_some() {
+        out = substring_by_chars(
+            out.as_str(),
+            modifiers.substring_start.unwrap_or(0),
+            modifiers.substring_end
+        );
+    }
+
+    if let Some(from) = modifiers.replace_from.as_ref() {
+        if !from.is_empty() {
+            out = out.replace(from, modifiers.replace_to.as_deref().unwrap_or(""));
+        }
+    }
+
+    out = apply_regex_replace(engine, schema_idx, out);
+
+    if modifiers.lowercase {
+        out = out.to_lowercase();
+    }
+    if modifiers.uppercase {
+        out = out.to_uppercase();
+    }
+    if modifiers.title_case {
+        out = to_title_case(out.as_str());
+    }
+
+    if is_null_token(out.as_str(), modifiers, &engine.null_values_lower[schema_idx]) {
+        return String::new();
+    }
+
+    if (modifiers.ceil || modifiers.floor || modifiers.round || modifiers.decimal_scale.is_some())
+        && !out.is_empty()
+    {
+        if let Some(num_out) = apply_numeric_modifiers(out.as_str(), modifiers) {
+            out = num_out;
+        }
+    }
+
+    if let Some(prefix) = modifiers.prefix.as_ref() {
+        let mut prefixed = String::with_capacity(prefix.len() + out.len());
+        prefixed.push_str(prefix);
+        prefixed.push_str(&out);
+        out = prefixed;
+    }
+    if let Some(suffix) = modifiers.suffix.as_ref() {
+        out.push_str(suffix.as_str());
+    }
+
+    out
+}
+
+fn apply_numeric_modifiers(input: &str, modifiers: &ColumnModifiers) -> Option<String> {
+    if input.contains(',') {
+        return None;
+    }
+
+    let mut value = Decimal::from_str_exact(input).ok()?;
+
+    if modifiers.ceil {
+        value = value.ceil();
+    } else if modifiers.floor {
+        value = value.floor();
+    } else if modifiers.round {
+        value = value.round();
+    }
+
+    if let Some(scale) = modifiers.decimal_scale {
+        let rounded = value.round_dp_with_strategy(scale, RoundingStrategy::MidpointAwayFromZero);
+        let mut fixed = rounded;
+        fixed.rescale(scale);
+        return Some(fixed.to_string());
+    }
+
+    Some(value.to_string())
+}
+
+fn apply_regex_replace(_engine: &ValidatorEngine, _schema_idx: usize, value: String) -> String {
+    #[cfg(feature = "pattern")]
+    {
+        if let Some((re, replacement)) = _engine
+            .regex_replace_rules
+            .get(_schema_idx)
+            .and_then(|r| r.as_ref())
+        {
+            return re.replace_all(value.as_str(), replacement.as_str()).to_string();
+        }
+    }
+    value
+}
+
+fn collapse_whitespace(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for token in input.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(token);
+    }
+    out
+}
+
+fn substring_by_chars(input: &str, start: usize, end: Option<usize>) -> String {
+    let char_count = input.chars().count();
+    if start >= char_count {
+        return String::new();
+    }
+    let end_idx = end.unwrap_or(char_count).min(char_count);
+    if end_idx <= start {
+        return String::new();
+    }
+    input.chars().skip(start).take(end_idx - start).collect()
+}
+
+fn to_title_case(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for (i, token) in input.split_whitespace().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let mut chars = token.chars();
+        if let Some(first) = chars.next() {
+            for c in first.to_uppercase() {
+                out.push(c);
+            }
+            let rest = chars.as_str().to_lowercase();
+            out.push_str(rest.as_str());
+        }
+    }
+    out
+}
+
+fn is_null_token(input: &str, modifiers: &ColumnModifiers, lower_cache: &[String]) -> bool {
+    if modifiers.null_values.is_empty() {
+        return false;
+    }
+    if modifiers.null_values_case_insensitive {
+        let candidate = input.to_lowercase();
+        return lower_cache.iter().any(|v| candidate == *v);
+    }
+    modifiers.null_values.iter().any(|v| input == v)
+}
+
 fn is_valid_int(s: &str) -> bool {
     let bs = s.as_bytes();
     if bs.is_empty() {
@@ -783,43 +1101,26 @@ fn is_valid_number(s: &str) -> bool {
     is_valid_int(s) || is_valid_double(s)
 }
 
-fn is_valid_decimal(s: &str, precision: u32) -> bool {
+/// Validate and normalize a decimal string in a single parse pass.
+/// Returns the normalized string on success, or an error code on failure.
+fn validate_normalize_decimal(s: &str, precision: u32, strict: bool) -> Result<String, ErrorCode> {
     if s.contains(',') {
-        return false;
+        return Err(ErrorCode::InvalidType);
     }
     let d = match Decimal::from_str_exact(s) {
         Ok(v) => v,
-        Err(_) => return false,
+        Err(_) => return Err(ErrorCode::InvalidType),
     };
     if d.scale() > precision {
-        return false;
+        return Err(ErrorCode::InvalidType);
+    }
+    if strict && d.scale() != precision {
+        return Err(ErrorCode::PrecisionExceeded);
     }
     let rounded = d.round_dp_with_strategy(precision, RoundingStrategy::MidpointAwayFromZero);
     let mut fixed = rounded;
     fixed.rescale(precision);
-    true
-}
-
-fn has_exact_decimal_scale(s: &str, precision: u32) -> bool {
-    if s.contains(',') {
-        return false;
-    }
-    let d = match Decimal::from_str_exact(s) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    d.scale() == precision
-}
-
-fn normalize_decimal(s: &str, precision: u32) -> Option<String> {
-    if s.contains(',') {
-        return None;
-    }
-    let d = Decimal::from_str_exact(s).ok()?;
-    let rounded = d.round_dp_with_strategy(precision, RoundingStrategy::MidpointAwayFromZero);
-    let mut fixed = rounded;
-    fixed.rescale(precision);
-    Some(fixed.to_string())
+    Ok(fixed.to_string())
 }
 
 fn is_valid_email(s: &str) -> bool {
@@ -942,4 +1243,209 @@ fn parse_3_u32(s: &str, sep: u8) -> Option<(u32, u32, u32)> {
     parts[2] = acc;
 
     Some((parts[0], parts[1], parts[2]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn detects_duplicate_after_modifier_normalization() {
+        let schema_json = json!({
+            "hasHeaders": true,
+            "columns": [
+                {
+                    "name": "email",
+                    "type": "email",
+                    "required": true,
+                    "unique": true,
+                    "modifiers": {
+                        "trim": true,
+                        "lowercase": true
+                    }
+                }
+            ]
+        })
+        .to_string();
+
+        let mut engine = ValidatorEngine::new(&schema_json, 1000, false).expect("engine init");
+        let csv = b"email\n Alice@Example.com \nalice@example.com\n";
+        engine.parse_slice(csv);
+        engine.flush_end();
+
+        let codes = take_error_codes(&mut engine);
+        assert_eq!(count_code(&codes, ErrorCode::DuplicateValue as u8), 1);
+    }
+
+    #[test]
+    fn normalizes_with_prefix_suffix_and_decimal_scale() {
+        let schema_json = json!({
+            "hasHeaders": false,
+            "columns": [
+                {
+                    "name": "name",
+                    "type": "string",
+                    "modifiers": {
+                        "trim": true,
+                        "collapseWhitespace": true,
+                        "prefix": "Ms. ",
+                        "suffix": " (VIP)"
+                    }
+                },
+                {
+                    "name": "amount",
+                    "type": "decimal",
+                    "precision": 2,
+                    "strictPrecision": false,
+                    "modifiers": {
+                        "decimalScale": 2
+                    }
+                }
+            ]
+        })
+        .to_string();
+
+        let mut engine = ValidatorEngine::new(&schema_json, 1000, true).expect("engine init");
+        engine.parse_slice(b"   Alice   Doe  ,12.345\n");
+        engine.flush_end();
+
+        let codes = take_error_codes(&mut engine);
+        assert!(codes.is_empty());
+
+        let normalized = String::from_utf8(engine.take_normalized()).expect("utf8 normalized");
+        assert_eq!(normalized, "Ms. Alice Doe (VIP),12.35\n");
+    }
+
+    #[test]
+    fn applies_ceil_before_decimal_scale() {
+        let schema_json = json!({
+            "hasHeaders": false,
+            "columns": [
+                {
+                    "name": "amount",
+                    "type": "decimal",
+                    "precision": 2,
+                    "strictPrecision": false,
+                    "modifiers": {
+                        "ceil": true,
+                        "decimalScale": 2
+                    }
+                }
+            ]
+        })
+        .to_string();
+
+        let mut engine = ValidatorEngine::new(&schema_json, 1000, true).expect("engine init");
+        engine.parse_slice(b"1.01\n");
+        engine.flush_end();
+
+        let codes = take_error_codes(&mut engine);
+        assert!(codes.is_empty());
+
+        let normalized = String::from_utf8(engine.take_normalized()).expect("utf8 normalized");
+        assert_eq!(normalized, "2.00\n");
+    }
+
+    #[test]
+    fn supports_substring_replace_and_title_case_modifiers() {
+        let schema_json = json!({
+            "hasHeaders": false,
+            "columns": [
+                {
+                    "name": "name",
+                    "type": "string",
+                    "modifiers": {
+                        "trim": true,
+                        "substringStart": 0,
+                        "substringEnd": 10,
+                        "replaceFrom": "0",
+                        "replaceTo": "o",
+                        "titleCase": true
+                    }
+                }
+            ]
+        })
+        .to_string();
+
+        let mut engine = ValidatorEngine::new(&schema_json, 1000, true).expect("engine init");
+        engine.parse_slice(b"  j0hn   d0e   \n");
+        engine.flush_end();
+
+        let codes = take_error_codes(&mut engine);
+        assert!(codes.is_empty());
+
+        let normalized = String::from_utf8(engine.take_normalized()).expect("utf8 normalized");
+        assert_eq!(normalized, "John Doe\n");
+    }
+
+    #[test]
+    fn null_tokens_are_treated_as_empty() {
+        let schema_json = json!({
+            "hasHeaders": false,
+            "columns": [
+                {
+                    "name": "middleName",
+                    "type": "string",
+                    "required": true,
+                    "nullable": false,
+                    "modifiers": {
+                        "nullValues": ["N/A", "NULL", "-"],
+                        "nullValuesCaseInsensitive": true
+                    }
+                }
+            ]
+        })
+        .to_string();
+
+        let mut engine = ValidatorEngine::new(&schema_json, 1000, false).expect("engine init");
+        engine.parse_slice(b"n/a\n");
+        engine.flush_end();
+
+        let codes = take_error_codes(&mut engine);
+        assert_eq!(count_code(&codes, ErrorCode::MissingRequired as u8), 1);
+    }
+
+    #[test]
+    fn detects_duplicate_composite_key() {
+        let schema_json = json!({
+            "hasHeaders": true,
+            "uniqueGroups": [
+                {
+                    "name": "customer_email_key",
+                    "columns": ["customerId", "email"]
+                }
+            ],
+            "columns": [
+                { "name": "customerId", "type": "int", "required": true },
+                {
+                    "name": "email",
+                    "type": "email",
+                    "required": true,
+                    "modifiers": { "trim": true, "lowercase": true }
+                }
+            ]
+        })
+        .to_string();
+
+        let mut engine = ValidatorEngine::new(&schema_json, 1000, false).expect("engine init");
+        let csv = b"customerId,email\n1,A@EXAMPLE.COM\n1,a@example.com\n";
+        engine.parse_slice(csv);
+        engine.flush_end();
+
+        let codes = take_error_codes(&mut engine);
+        assert_eq!(count_code(&codes, ErrorCode::DuplicateCombination as u8), 1);
+    }
+
+    fn take_error_codes(engine: &mut ValidatorEngine) -> Vec<u8> {
+        let packed = engine.take_errors_packed(10_000);
+        packed
+            .chunks_exact(2)
+            .map(|chunk| (chunk[1] & 0xff) as u8)
+            .collect()
+    }
+
+    fn count_code(codes: &[u8], code: u8) -> usize {
+        codes.iter().filter(|c| **c == code).count()
+    }
 }

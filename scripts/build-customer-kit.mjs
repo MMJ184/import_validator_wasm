@@ -30,6 +30,18 @@ const copyPlan = [
         to: path.join(outDir, "docs", "CUSTOMER_DISTRIBUTION.md"),
     },
     {
+        from: path.join(rootDir, "docs", "CLIENT_QUICKSTART.md"),
+        to: path.join(outDir, "docs", "CLIENT_QUICKSTART.md"),
+    },
+    {
+        from: path.join(rootDir, "docs", "SCHEMA_REFERENCE.md"),
+        to: path.join(outDir, "docs", "SCHEMA_REFERENCE.md"),
+    },
+    {
+        from: path.join(rootDir, "docs", "SDK_API.md"),
+        to: path.join(outDir, "docs", "SDK_API.md"),
+    },
+    {
         from: path.join(rootDir, "docs", "validation-config.schema.json"),
         to: path.join(outDir, "docs", "validation-config.schema.json"),
     },
@@ -86,8 +98,13 @@ async function createKit() {
         [
             "Import Validator Customer Kit",
             "",
-            "1) Read docs/CUSTOMER_DISTRIBUTION.md",
-            "2) Share schema contract from docs/validation-config.schema.json",
+            "Start here:",
+            "  docs/CLIENT_QUICKSTART.md        — integration steps and examples",
+            "  docs/SCHEMA_REFERENCE.md         — full schema field reference",
+            "  docs/SDK_API.md                  — SDK API and event reference",
+            "  docs/CUSTOMER_DISTRIBUTION.md    — asset hosting and deployment guide",
+            "  docs/validation-config.schema.json — machine-readable schema contract",
+            "",
             "3) Integrate sdk-dist + worker-dist + core-dist in customer app",
             "",
             `Generated: ${manifest.generatedAtUtc}`

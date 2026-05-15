@@ -5,15 +5,35 @@ import { defaultWorkerUrl } from "@import-validator/sdk/vite";
 import { defaultWasmUrl } from "@import-validator/core";
 import { demoSchema } from "./schema";
 
-const $file = document.getElementById("file") as HTMLInputElement;
-const $estimate = document.getElementById("estimate") as HTMLInputElement;
-const $estimateOnly = document.getElementById("estimateOnly") as HTMLInputElement;
-const $format = document.getElementById("format") as HTMLSelectElement;
-const $run = document.getElementById("run") as HTMLButtonElement;
-const $status = document.getElementById("status") as HTMLPreElement;
-const $errors = document.getElementById("errors") as HTMLPreElement;
-const $metrics = document.getElementById("metrics") as HTMLPreElement;
+// ── Element refs ──────────────────────────────────────────────────────────────
+const $file          = document.getElementById("file")               as HTMLInputElement;
+const $estimate      = document.getElementById("estimate")           as HTMLInputElement;
+const $estimateOnly  = document.getElementById("estimateOnly")       as HTMLInputElement;
+const $format        = document.getElementById("format")             as HTMLSelectElement;
+const $namePrefix    = document.getElementById("namePrefix")         as HTMLInputElement;
+const $nameSuffix    = document.getElementById("nameSuffix")         as HTMLInputElement;
+const $amountScale   = document.getElementById("amountScale")        as HTMLInputElement;
+const $nameSubstringStart = document.getElementById("nameSubstringStart") as HTMLInputElement;
+const $nameSubstringEnd   = document.getElementById("nameSubstringEnd")   as HTMLInputElement;
+const $nameReplaceFrom = document.getElementById("nameReplaceFrom")  as HTMLInputElement;
+const $nameReplaceTo   = document.getElementById("nameReplaceTo")    as HTMLInputElement;
+const $nullTokens    = document.getElementById("nullTokens")         as HTMLInputElement;
+const $modTrimCollapse    = document.getElementById("modTrimCollapse")    as HTMLInputElement;
+const $modTitleCase       = document.getElementById("modTitleCase")       as HTMLInputElement;
+const $modEmailLowercase  = document.getElementById("modEmailLowercase")  as HTMLInputElement;
+const $modUnique          = document.getElementById("modUnique")          as HTMLInputElement;
+const $modCompositeUnique = document.getElementById("modCompositeUnique") as HTMLInputElement;
+const $run           = document.getElementById("run")                as HTMLButtonElement;
+const $statusBar     = document.getElementById("statusBar")          as HTMLDivElement;
+const $status        = document.getElementById("status")             as HTMLSpanElement;
+const $metrics       = document.getElementById("metrics")            as HTMLDivElement;
+const $errors        = document.getElementById("errors")             as HTMLDivElement;
+const $errorCount    = document.getElementById("errorCount")         as HTMLSpanElement;
+const $uploadZone    = document.getElementById("uploadZone")         as HTMLLabelElement;
+const $fileName      = document.getElementById("fileName")           as HTMLDivElement;
+const $fileNameText  = document.getElementById("fileNameText")       as HTMLSpanElement;
 
+// ── State ─────────────────────────────────────────────────────────────────────
 let lastValidator: ReturnType<typeof createValidator> | null = null;
 let pendingFile: File | null = null;
 let shouldEstimate = false;
@@ -35,13 +55,97 @@ let renderedErrorDetailSetByRow = new Map<number, Set<string>>();
 let headerMissingRequiredColumns = new Set<string>();
 let headerHasInvalidEncoding = false;
 
+// ── File input + drag-drop ────────────────────────────────────────────────────
+$file.addEventListener("change", () => {
+    const f = $file.files?.[0];
+    if (f) {
+        $fileNameText.textContent = f.name;
+        $fileName.classList.remove("hidden");
+    } else {
+        $fileName.classList.add("hidden");
+    }
+});
+
+$uploadZone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    $uploadZone.classList.add("drag-over");
+});
+$uploadZone.addEventListener("dragleave", () => {
+    $uploadZone.classList.remove("drag-over");
+});
+$uploadZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    $uploadZone.classList.remove("drag-over");
+    const droppedFile = e.dataTransfer?.files[0];
+    if (droppedFile) {
+        const dt = new DataTransfer();
+        dt.items.add(droppedFile);
+        $file.files = dt.files;
+        $fileNameText.textContent = droppedFile.name;
+        $fileName.classList.remove("hidden");
+    }
+});
+
+// ── Render helpers ────────────────────────────────────────────────────────────
+function esc(s: string): string {
+    return s
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
 function setStatus(s: string) {
     $status.textContent = s;
+    let state = "idle";
+    if (/validat/i.test(s) || /estimat/i.test(s)) state = "running";
+    else if (/done/i.test(s)) state = "done";
+    else if (/failed/i.test(s)) state = "failed";
+    $statusBar.dataset.state = state;
+}
+
+function renderMetrics(pairs: Array<[string, string | number]>) {
+    if (!pairs.length) {
+        $metrics.innerHTML = '<p class="empty-hint">No data yet</p>';
+        return;
+    }
+    $metrics.innerHTML = pairs
+        .map(([label, value]) =>
+            `<div class="metric-tile">` +
+            `<span class="metric-label">${esc(label)}</span>` +
+            `<span class="metric-value">${esc(String(value))}</span>` +
+            `</div>`
+        )
+        .join("");
+}
+
+function renderErrors(lines: string[]) {
+    if (!lines.length) {
+        $errors.innerHTML = '<p class="empty-hint">No errors</p>';
+        $errorCount.classList.add("hidden");
+        return;
+    }
+    $errorCount.textContent = String(lines.length);
+    $errorCount.classList.remove("hidden");
+    $errors.innerHTML = lines
+        .map((line) => {
+            const m = line.match(/^(Header|Row \d+):\s*(.*)/);
+            if (m) {
+                const isHeader = m[1] === "Header";
+                return (
+                    `<div class="error-item">` +
+                    `<span class="error-badge${isHeader ? " error-badge--header" : ""}">${esc(m[1])}</span>` +
+                    `<span class="error-msg">${esc(m[2])}</span>` +
+                    `</div>`
+                );
+            }
+            return `<div class="error-item"><span class="error-msg">${esc(line)}</span></div>`;
+        })
+        .join("");
 }
 
 function resetUI() {
-    $errors.textContent = "(none)";
-    $metrics.textContent = "(none)";
+    renderErrors([]);
+    $metrics.innerHTML = '<p class="empty-hint">No data yet</p>';
     totalRowsProcessed = 0;
     totalErrorsAdded = 0;
     totalRowsExpected = 0;
@@ -62,6 +166,7 @@ function pendingLabel() {
         : "n/a";
 }
 
+// ── Validate ──────────────────────────────────────────────────────────────────
 $run.onclick = () => {
     const f = $file.files?.[0];
     if (!f) {
@@ -76,19 +181,27 @@ $run.onclick = () => {
     shouldEstimate = $estimate.checked;
     shouldEstimateOnly = $estimateOnly.checked;
     selectedFormat = ($format.value as ValidationFormat) ?? "auto";
+
     const inferredFormat = inferFormatFromFileName(f.name);
-    if (selectedFormat !== "auto" && inferredFormat !== "auto" && selectedFormat !== inferredFormat) {
-        alert(`Selected format "${selectedFormat}" does not match file type "${f.name}". Choose "${inferredFormat}" or "auto".`);
+    if (
+        selectedFormat !== "auto" &&
+        inferredFormat !== "auto" &&
+        selectedFormat !== inferredFormat
+    ) {
+        alert(`Selected format "${selectedFormat}" does not match file "${f.name}". Choose "${inferredFormat}" or "auto".`);
         return;
     }
-    resetUI();
 
-    $metrics.textContent = [
-        `File size: ${formatBytes(f.size)}`,
-        `Route: ${selectedFormat}`,
-        `Estimate requested: ${shouldEstimate ? "yes" : "no"}`,
-        `Estimate only: ${shouldEstimateOnly ? "yes" : "no"}`
-    ].join("\n");
+    resetUI();
+    const runtimeSchema = buildRuntimeSchema();
+    const modifierSummary = describeRuntimeModifiers();
+
+    renderMetrics([
+        ["File size", formatBytes(f.size)],
+        ["Route", selectedFormat],
+        ["Estimate", shouldEstimate ? "yes" : "no"],
+        ["Estimate only", shouldEstimateOnly ? "yes" : "no"],
+    ]);
 
     if (shouldEstimateOnly) {
         setStatus("Estimating only | Done rows: 0 | Pending rows: calculating");
@@ -100,11 +213,11 @@ $run.onclick = () => {
 
     const v = createValidator(
         {
-            schema: demoSchema,
+            schema: runtimeSchema,
             wasmUrl: defaultWasmUrl,
             workerUrl: defaultWorkerUrl,
             maxErrors: 10_000,
-            emitNormalized: false
+            emitNormalized: false,
         },
         {
             onReady: () => {
@@ -125,7 +238,7 @@ $run.onclick = () => {
                     format: selectedFormat,
                     profile: "balanced",
                     maxFileBytes: 600 * 1024 * 1024,
-                    maxRowsEstimate: 2_0_000_000,
+                    maxRowsEstimate: 2_000_000,
                     maxColumns: 500,
                     timeoutMs: 120_000,
                 });
@@ -139,33 +252,35 @@ $run.onclick = () => {
                 const safeBytes = chooseSafeBytesForDevice();
                 assumedMaxRowsForDevice = avg > 0 ? Math.round(safeBytes / avg) : 0;
 
-                $metrics.textContent = [
-                    `File size: ${formatBytes(f.size)}`,
-                    `Average bytes/row (estimated): ${avgBytesPerRow.toFixed(1)}`,
-                    `Estimated rows by file size: ${estimatedRowsFromSize}`,
-                    `Estimated columns: ${columns ?? "n/a"}`,
-                    `Assumed max rows for this device: ${assumedMaxRowsForDevice}`
-                ].join("\n");
+                renderMetrics([
+                    ["File size",          formatBytes(f.size)],
+                    ["Avg bytes / row",    avg.toFixed(1)],
+                    ["Est. rows (size)",   String(estimatedRowsFromSize)],
+                    ["Est. columns",       String(columns ?? "n/a")],
+                    ["Max rows (device)",  String(assumedMaxRowsForDevice)],
+                    ["Modifiers",          modifierSummary],
+                ]);
             },
+
             onMetrics: (m) => {
-                $metrics.textContent = [
-                    `Format: ${m.format}`,
-                    `File size: ${formatBytes(m.fileSizeBytes)}`,
-                    `Time taken: ${m.elapsedMs} ms`,
-                    `Throughput: ${m.rowsPerSec} rows/sec`,
-                    `Rows processed: ${m.rowsProcessed}`,
-                    `Errors posted: ${m.errorsPosted}`,
-                    `Dry run: ${m.dryRun ? "yes" : "no"}`,
-                    `Average bytes/row (estimated): ${avgBytesPerRow > 0 ? avgBytesPerRow.toFixed(1) : "n/a"}`,
-                    `Estimated rows by file size: ${estimatedRowsFromSize || "n/a"}`,
-                    `Assumed max rows for this device: ${assumedMaxRowsForDevice || "n/a"}`
-                ].join("\n");
+                renderMetrics([
+                    ["Format",            m.format],
+                    ["File size",         formatBytes(m.fileSizeBytes)],
+                    ["Time",              `${m.elapsedMs} ms`],
+                    ["Throughput",        `${m.rowsPerSec.toLocaleString()} rows/s`],
+                    ["Rows processed",    m.rowsProcessed.toLocaleString()],
+                    ["Errors posted",     String(m.errorsPosted)],
+                    ["Dry run",           m.dryRun ? "yes" : "no"],
+                    ["Avg bytes / row",   avgBytesPerRow > 0 ? avgBytesPerRow.toFixed(1) : "n/a"],
+                    ["Est. rows (size)",  estimatedRowsFromSize ? String(estimatedRowsFromSize) : "n/a"],
+                    ["Max rows (device)", assumedMaxRowsForDevice ? String(assumedMaxRowsForDevice) : "n/a"],
+                ]);
             },
 
             onProgress: (p) => {
                 totalRowsProcessed += p.rowsProcessed;
                 totalErrorsAdded += p.errorsAdded;
-                setStatus(`Validating | Done rows: ${totalRowsProcessed} | Pending rows: ${pendingLabel()} | Errors: ${totalErrorsAdded}`);
+                setStatus(`Validating | Done rows: ${totalRowsProcessed.toLocaleString()} | Pending rows: ${pendingLabel()} | Errors: ${totalErrorsAdded}`);
             },
 
             onErrors: (errs) => {
@@ -204,7 +319,7 @@ $run.onclick = () => {
                 }
 
                 if (!renderedErrorDetailsByRow.size) {
-                    $errors.textContent = "(none)";
+                    renderErrors([]);
                     return;
                 }
 
@@ -225,14 +340,12 @@ $run.onclick = () => {
                             const missing = Array.from(headerMissingRequiredColumns).sort((a, b) => a.localeCompare(b));
                             parts.push(`missing required columns (${missing.length}): ${missing.join(", ")}`);
                         }
-                        if (!parts.length) {
-                            parts = ["validation error"];
-                        }
+                        if (!parts.length) parts = ["validation error"];
                         const label = row === 0 ? "Header" : `Row ${row}`;
                         return `${label}: ${parts.join(", ")}`;
                     });
 
-                $errors.textContent = lines.join("\n");
+                renderErrors(lines);
             },
 
             onDone: () => {
@@ -243,38 +356,42 @@ $run.onclick = () => {
                 if (shouldEstimateOnly) {
                     setStatus(`Done (estimate only) | Estimated rows: ${totalRowsExpected || "n/a"} | Errors: 0`);
                 } else {
-                    setStatus(`Done | Done rows: ${totalRowsProcessed} | Pending rows: ${pendingLabel()} | Errors: ${totalErrorsAdded}`);
+                    setStatus(`Done | Rows: ${totalRowsProcessed.toLocaleString()} | Errors: ${totalErrorsAdded}`);
                 }
-                $metrics.textContent = [
-                    `File size: ${formatBytes(f.size)}`,
-                    `Time taken: ${elapsedMs} ms`,
-                    `Throughput: ${rowsPerSec} rows/sec`,
-                    `Average bytes/row (estimated): ${avgBytesPerRow > 0 ? avgBytesPerRow.toFixed(1) : "n/a"}`,
-                    `Estimated rows by file size: ${estimatedRowsFromSize || "n/a"}`,
-                    `Assumed max rows for this device: ${assumedMaxRowsForDevice || "n/a"}`
-                ].join("\n");
+
+                renderMetrics([
+                    ["File size",         formatBytes(f.size)],
+                    ["Time",              `${elapsedMs} ms`],
+                    ["Throughput",        `${rowsPerSec.toLocaleString()} rows/s`],
+                    ["Rows processed",    totalRowsProcessed.toLocaleString()],
+                    ["Errors found",      String(totalErrorsAdded)],
+                    ["Avg bytes / row",   avgBytesPerRow > 0 ? avgBytesPerRow.toFixed(1) : "n/a"],
+                    ["Est. rows (size)",  estimatedRowsFromSize ? String(estimatedRowsFromSize) : "n/a"],
+                    ["Max rows (device)", assumedMaxRowsForDevice ? String(assumedMaxRowsForDevice) : "n/a"],
+                ]);
             },
 
             onFatal: (msg, fatal) => {
                 setStatus("Failed");
+                const lines: string[] = [];
                 if (fatal) {
-                    $errors.textContent = [
-                        `[${fatal.code}] ${fatal.message}`,
-                        fatal.fileName ? `File: ${fatal.fileName}` : "",
-                        typeof fatal.fileSizeBytes === "number" ? `Size: ${fatal.fileSizeBytes} bytes` : "",
-                        fatal.details ? `Details: ${fatal.details}` : ""
-                    ].filter(Boolean).join("\n");
+                    lines.push(`[${fatal.code}] ${fatal.message}`);
+                    if (fatal.fileName)                           lines.push(`File: ${fatal.fileName}`);
+                    if (typeof fatal.fileSizeBytes === "number")  lines.push(`Size: ${fatal.fileSizeBytes} bytes`);
+                    if (fatal.details)                            lines.push(`Details: ${fatal.details}`);
                 } else {
-                    $errors.textContent = `Validation failed: ${msg}`;
+                    lines.push(`Validation failed: ${msg}`);
                 }
+                renderErrors(lines.map((l) => `Header: ${l}`));
                 pendingFile = null;
-            }
+            },
         }
     );
 
     lastValidator = v;
 };
 
+// ── Utilities ─────────────────────────────────────────────────────────────────
 function chooseSafeBytesForDevice() {
     const MB = 1024 * 1024;
     const mem = (navigator as any).deviceMemory as number | undefined;
@@ -293,7 +410,6 @@ function formatBytes(bytes: number): string {
 
 function compactRowMessage(message: string, row: number): string {
     const text = message.trim();
-
     if (row === 0) {
         return text
             .replace(/^Header\s*:\s*/i, "")
@@ -301,13 +417,8 @@ function compactRowMessage(message: string, row: number): string {
             .replace(/^Header\s+/i, "")
             .trim();
     }
-
     const exactPrefix = new RegExp(`^(?:Row\\s+${row}\\s*[:,-]\\s*)+`, "i");
-    if (exactPrefix.test(text)) {
-        return text.replace(exactPrefix, "").trim();
-    }
-
-    // fallback for any row prefix pattern
+    if (exactPrefix.test(text)) return text.replace(exactPrefix, "").trim();
     return text.replace(/^(?:Row\s+\d+\s*[:,-]\s*)+/i, "").trim();
 }
 
@@ -316,4 +427,123 @@ function inferFormatFromFileName(name: string): ValidationFormat {
     if (lower.endsWith(".csv")) return "csv";
     if (lower.endsWith(".xlsx") || lower.endsWith(".xlsm") || lower.endsWith(".xls")) return "excel";
     return "auto";
+}
+
+function buildRuntimeSchema() {
+    const schema = JSON.parse(JSON.stringify(demoSchema));
+    const byName = new Map<string, any>(
+        schema.columns.map((c: any) => [c.name, c])
+    );
+
+    const namePrefix = $namePrefix.value.trim();
+    const nameSuffix = $nameSuffix.value.trim();
+    const amountScale = safeScale($amountScale.value);
+    const nameSubstringStart = parseOptionalNonNegativeInt($nameSubstringStart.value);
+    const nameSubstringEnd = parseOptionalNonNegativeInt($nameSubstringEnd.value);
+    const nameReplaceFrom = $nameReplaceFrom.value;
+    const nameReplaceTo = $nameReplaceTo.value;
+    const nullTokens = parseNullTokens($nullTokens.value);
+    const trimCollapseEnabled = $modTrimCollapse.checked;
+    const titleCaseEnabled = $modTitleCase.checked;
+    const lowercaseEmails = $modEmailLowercase.checked;
+    const uniqueEnabled = $modUnique.checked;
+    const compositeUniqueEnabled = $modCompositeUnique.checked;
+
+    const nameTargets = ["firstName", "middleName", "lastName", "surname"];
+    for (const colName of nameTargets) {
+        const col = byName.get(colName);
+        if (!col) continue;
+        col.modifiers = {
+            ...(col.modifiers ?? {}),
+            trim: trimCollapseEnabled,
+            collapseWhitespace: trimCollapseEnabled,
+            titleCase: titleCaseEnabled,
+            substringStart: nameSubstringStart,
+            substringEnd: nameSubstringEnd,
+            replaceFrom: nameReplaceFrom || undefined,
+            replaceTo: nameReplaceTo || undefined,
+            prefix: namePrefix || undefined,
+            suffix: nameSuffix || undefined,
+            nullValues: nullTokens,
+            nullValuesCaseInsensitive: true,
+        };
+    }
+
+    const email = byName.get("email");
+    if (email) {
+        email.modifiers = {
+            ...(email.modifiers ?? {}),
+            trim: true,
+            lowercase: lowercaseEmails,
+            nullValues: nullTokens,
+            nullValuesCaseInsensitive: true,
+        };
+    }
+
+    for (const amountColName of ["amount", "taxAmount"]) {
+        const amountCol = byName.get(amountColName);
+        if (!amountCol) continue;
+        amountCol.strictPrecision = false;
+        amountCol.modifiers = {
+            ...(amountCol.modifiers ?? {}),
+            decimalScale: amountScale,
+        };
+    }
+
+    if (!uniqueEnabled) {
+        for (const col of schema.columns) col.unique = false;
+    }
+    if (!compositeUniqueEnabled) {
+        schema.uniqueGroups = [];
+    }
+
+    return schema;
+}
+
+function describeRuntimeModifiers() {
+    const prefix = $namePrefix.value.trim() || "(none)";
+    const suffix = $nameSuffix.value.trim() || "(none)";
+    const scale = safeScale($amountScale.value);
+    return [
+        `namePrefix=${prefix}`,
+        `nameSuffix=${suffix}`,
+        `nameTrimCollapse=${$modTrimCollapse.checked ? "on" : "off"}`,
+        `nameTitleCase=${$modTitleCase.checked ? "on" : "off"}`,
+        `nameSubstring=${optionalPairLabel(parseOptionalNonNegativeInt($nameSubstringStart.value), parseOptionalNonNegativeInt($nameSubstringEnd.value))}`,
+        `nameReplace=${$nameReplaceFrom.value ? `${$nameReplaceFrom.value}->${$nameReplaceTo.value}` : "(none)"}`,
+        `emailLowercase=${$modEmailLowercase.checked ? "on" : "off"}`,
+        `nullTokens=${parseNullTokens($nullTokens.value).length}`,
+        `amountScale=${scale}`,
+        `uniqueChecks=${$modUnique.checked ? "on" : "off"}`,
+        `compositeUnique=${$modCompositeUnique.checked ? "on" : "off"}`,
+    ].join(", ");
+}
+
+function safeScale(raw: string) {
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed)) return 2;
+    if (parsed < 0) return 0;
+    if (parsed > 8) return 8;
+    return parsed;
+}
+
+function parseOptionalNonNegativeInt(raw: string): number | undefined {
+    const t = raw.trim();
+    if (!t) return undefined;
+    const parsed = Number.parseInt(t, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+    return parsed;
+}
+
+function parseNullTokens(raw: string): string[] {
+    return raw
+        .split(",")
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0);
+}
+
+function optionalPairLabel(start?: number, end?: number): string {
+    const a = start === undefined ? "-" : String(start);
+    const b = end === undefined ? "-" : String(end);
+    return `[${a},${b}]`;
 }

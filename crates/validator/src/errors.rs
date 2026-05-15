@@ -17,6 +17,8 @@ pub enum ErrorCode {
     PatternMismatch = 10,
     PrecisionExceeded = 11,
     ColumnCountMismatch = 12,
+    DuplicateValue = 13,
+    DuplicateCombination = 14,
 }
 
 #[repr(u8)]

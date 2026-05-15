@@ -19,6 +19,21 @@
         },
         "failOnExtraColumns": { "type": "boolean" },
         "totalColumns": { "type": "integer", "minimum": 1 },
+        "uniqueGroups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["columns"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "columns": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
         "columns": {
           "type": "array",
           "items": {
@@ -37,8 +52,33 @@
               "allowed": { "type": "array", "items": { "type": "string" } },
               "precision": { "type": "integer", "minimum": 0 },
               "strictPrecision": { "type": "boolean" },
+              "unique": { "type": "boolean" },
               "dateFormat": { "type": "string", "enum": ["ymd-dash", "dmy-slash", "mdy-slash"] },
-              "pattern": { "type": "string", "minLength": 1, "maxLength": 256 }
+              "pattern": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "modifiers": {
+                "type": "object",
+                "properties": {
+                  "trim": { "type": "boolean" },
+                  "collapseWhitespace": { "type": "boolean" },
+                  "titleCase": { "type": "boolean" },
+                  "lowercase": { "type": "boolean" },
+                  "uppercase": { "type": "boolean" },
+                  "prefix": { "type": "string" },
+                  "suffix": { "type": "string" },
+                  "ceil": { "type": "boolean" },
+                  "floor": { "type": "boolean" },
+                  "round": { "type": "boolean" },
+                  "decimalScale": { "type": "integer", "minimum": 0 },
+                  "substringStart": { "type": "integer", "minimum": 0 },
+                  "substringEnd": { "type": "integer", "minimum": 0 },
+                  "replaceFrom": { "type": "string" },
+                  "replaceTo": { "type": "string" },
+                  "regexReplacePattern": { "type": "string", "minLength": 1, "maxLength": 256 },
+                  "regexReplaceWith": { "type": "string" },
+                  "nullValues": { "type": "array", "items": { "type": "string" } },
+                  "nullValuesCaseInsensitive": { "type": "boolean" }
+                }
+              }
             }
           }
         }

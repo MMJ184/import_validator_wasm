@@ -96,6 +96,14 @@ playwright-report/
 test-results/
 
 ####################################
+# Example data files (CSV / Excel)
+####################################
+examples/**/*.csv
+examples/**/*.xlsx
+examples/**/*.xls
+examples/**/*.xlsm
+
+####################################
 # Misc
 ####################################
 *.swp
