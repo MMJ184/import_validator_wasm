@@ -62,6 +62,10 @@ export class Engine {
         return out;
     }
 
+    errorsLen(): number {
+        return this.engine.errors_count() as number;
+    }
+
     takeNormalized(): Uint8Array {
         return this.engine.take_normalized();
     }

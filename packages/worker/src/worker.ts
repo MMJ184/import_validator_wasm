@@ -21,7 +21,14 @@ type WorkerInitState = {
     schemaHasHeaders: boolean;
 };
 
+type CachedEngine = {
+    engine: import("@import-validator/core").Engine;
+    maxErrors: number;
+    emitNormalized: boolean;
+};
+
 let initState: WorkerInitState | null = null;
+let cachedEngine: CachedEngine | null = null;
 let operationQueue: Promise<void> = Promise.resolve();
 
 self.onmessage = (e: MessageEvent<WorkerRequest>) => {
@@ -88,6 +95,10 @@ async function handleInit(
         schemaDelimiter: extractSchemaDelimiter(req.schema),
         schemaHasHeaders: extractSchemaHasHeaders(req.schema),
     };
+
+    // Cache the warmup engine so the first validate call reuses it instead of
+    // allocating a second engine immediately after init.
+    cachedEngine = { engine: warmupEngine, maxErrors: req.maxErrors, emitNormalized: req.emitNormalized };
 
     post({ type: "ready", columns: warmupEngine.schemaColumns() });
 }
@@ -198,7 +209,7 @@ async function validateWithSignal(
 
         const maxErrors = req.options.maxErrors ?? state.defaultMaxErrors;
         const emitNormalized = req.options.emitNormalized ?? state.defaultEmitNormalized;
-        const engine = await createEngine(state.wasmUrl, state.schema, maxErrors, emitNormalized);
+        const engine = await takeOrCreateEngine(state, maxErrors, emitNormalized);
 
         const out = await runXlsx(req.file, engine, post, {
             emitNormalized: req.options.emitNormalized,
@@ -232,7 +243,7 @@ async function validateWithSignal(
 
     const maxErrors = req.options.maxErrors ?? state.defaultMaxErrors;
     const emitNormalized = req.options.emitNormalized ?? state.defaultEmitNormalized;
-    const engine = await createEngine(state.wasmUrl, state.schema, maxErrors, emitNormalized);
+    const engine = await takeOrCreateEngine(state, maxErrors, emitNormalized);
 
     const out = await runCsv(req.file, engine, post, {
         emitNormalized: req.options.emitNormalized,
@@ -355,6 +366,23 @@ async function runWithTimeout<T>(
     } finally {
         clearTimeout(timer);
     }
+}
+
+async function takeOrCreateEngine(
+    state: WorkerInitState,
+    maxErrors: number,
+    emitNormalized: boolean
+): Promise<import("@import-validator/core").Engine> {
+    if (
+        cachedEngine &&
+        cachedEngine.maxErrors === maxErrors &&
+        cachedEngine.emitNormalized === emitNormalized
+    ) {
+        const eng = cachedEngine.engine;
+        cachedEngine = null;
+        return eng;
+    }
+    return createEngine(state.wasmUrl, state.schema, maxErrors, emitNormalized);
 }
 
 function extractSchemaDelimiter(schema: object): number | string | undefined {

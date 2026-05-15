@@ -5,6 +5,23 @@ import { defaultWorkerUrl } from "@import-validator/sdk/vite";
 import { defaultWasmUrl } from "@import-validator/core";
 import { demoSchema } from "./schema";
 
+// ── Dark mode ─────────────────────────────────────────────────────────────────
+const $themeToggle = document.getElementById("themeToggle") as HTMLButtonElement;
+
+function applyTheme(dark: boolean) {
+    document.documentElement.dataset.theme = dark ? "dark" : "";
+}
+
+const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+const savedTheme = localStorage.getItem("theme");
+applyTheme(savedTheme === "dark" || (savedTheme === null && prefersDark));
+
+$themeToggle.addEventListener("click", () => {
+    const isDark = document.documentElement.dataset.theme === "dark";
+    applyTheme(!isDark);
+    localStorage.setItem("theme", !isDark ? "dark" : "light");
+});
+
 // ── Element refs ──────────────────────────────────────────────────────────────
 const $file          = document.getElementById("file")               as HTMLInputElement;
 const $estimate      = document.getElementById("estimate")           as HTMLInputElement;

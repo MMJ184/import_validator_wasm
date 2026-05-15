@@ -57,6 +57,9 @@ function createMockEngine() {
         },
         takeErrors() {
             return [];
+        },
+        errorsLen() {
+            return 0;
         }
     };
 }

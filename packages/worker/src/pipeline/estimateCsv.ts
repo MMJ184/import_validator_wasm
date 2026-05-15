@@ -42,7 +42,6 @@ export async function estimateCsv(
         hasAnyByte = true;
 
         for (let i = 0; i < chunk.length; i += 1) {
-            if (options.signal?.aborted) throw abortedError();
             const b = chunk[i];
 
             if (endedWithRowBreak) endedWithRowBreak = false;

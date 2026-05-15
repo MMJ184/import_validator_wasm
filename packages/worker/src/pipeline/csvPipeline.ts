@@ -62,6 +62,7 @@ export async function runCsvChunks(
             drainErrorsPacked(engine);
             return;
         }
+        if (engine.errorsLen() === 0) return;
         while (true) {
             if (totalPostedErrors >= maxPostErrorsTotal) return;
 
@@ -155,10 +156,8 @@ export async function runCsvChunks(
 }
 
 function drainErrorsPacked(engine: Engine) {
-    while (true) {
-        const batch = engine.takeErrors(10_000);
-        if (!batch.length) return;
-    }
+    const count = engine.errorsLen();
+    if (count > 0) engine.takeErrors(count);
 }
 
 function pushChunkSafe(

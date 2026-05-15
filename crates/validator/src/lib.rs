@@ -82,6 +82,10 @@ pub struct ValidatorEngine {
 
     // Scratch buffer for building composite-uniqueness keys without allocating a Vec<&str>.
     composite_key_buf: String,
+
+    // Precomputed flag per schema column: true when apply_modifiers is a no-op (identity).
+    // Skips the entire modifier pipeline for columns with only the default trim setting.
+    modifier_is_identity: Vec<bool>,
 }
 
 #[wasm_bindgen]
@@ -234,6 +238,13 @@ impl ValidatorEngine {
             })
             .collect::<Vec<Vec<String>>>();
 
+        // Precompute identity flag to skip apply_modifiers for columns with no active modifiers.
+        let modifier_is_identity = schema
+            .columns
+            .iter()
+            .map(|c| is_identity_modifiers(&c.modifiers))
+            .collect::<Vec<_>>();
+
         // If no headers, we consider header already "parsed" and schema_to_input is identity
         let header_parsed = !schema.has_headers;
         let schema_to_input = if schema.has_headers {
@@ -272,6 +283,7 @@ impl ValidatorEngine {
             row_values,
             null_values_lower,
             composite_key_buf: String::new(),
+            modifier_is_identity,
         })
     }
 
@@ -311,6 +323,11 @@ impl ValidatorEngine {
             }
         }
         out
+    }
+
+    /// Returns the number of errors currently queued without draining them.
+    pub fn errors_count(&self) -> u32 {
+        self.errors.len() as u32
     }
 
     /// Schema column names in schema order, as JSON array.
@@ -815,6 +832,9 @@ impl ValidatorEngine {
             Ok(v) => v,
             Err(_) => return Err(()),
         };
+        if self.modifier_is_identity[schema_idx] {
+            return Ok(input.to_string());
+        }
         Ok(apply_modifiers(self, schema_idx, input, modifiers))
     }
 
@@ -849,9 +869,7 @@ impl ValidatorEngine {
                 continue;
             }
 
-            let key = self.composite_key_buf.clone();
-            let seen = self.unique_group_sets[gi].insert(key);
-            if !seen {
+            if self.unique_group_sets[gi].contains(self.composite_key_buf.as_str()) {
                 self.push_err(
                     self.data_row,
                     col_for_error as u32,
@@ -860,6 +878,7 @@ impl ValidatorEngine {
                 );
                 return;
             }
+            self.unique_group_sets[gi].insert(self.composite_key_buf.clone());
         }
     }
 
@@ -1066,6 +1085,19 @@ fn is_null_token(input: &str, modifiers: &ColumnModifiers, lower_cache: &[String
         return lower_cache.iter().any(|v| candidate == *v);
     }
     modifiers.null_values.iter().any(|v| input == v)
+}
+
+fn is_identity_modifiers(modifiers: &ColumnModifiers) -> bool {
+    if modifiers.collapse_whitespace { return false; }
+    if modifiers.substring_start.is_some() || modifiers.substring_end.is_some() { return false; }
+    if modifiers.replace_from.as_ref().map_or(false, |s| !s.is_empty()) { return false; }
+    if modifiers.lowercase || modifiers.uppercase || modifiers.title_case { return false; }
+    if !modifiers.null_values.is_empty() { return false; }
+    if modifiers.ceil || modifiers.floor || modifiers.round || modifiers.decimal_scale.is_some() { return false; }
+    if modifiers.prefix.is_some() || modifiers.suffix.is_some() { return false; }
+    #[cfg(feature = "pattern")]
+    if modifiers.regex_replace_pattern.is_some() { return false; }
+    true
 }
 
 fn is_valid_int(s: &str) -> bool {
