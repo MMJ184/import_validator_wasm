@@ -1,7 +1,7 @@
 import { chooseChunkSizeSmart } from "@import-validator/core";
 import { createEngine } from "./loaders/wasmLoader";
 import { formatFatalMessage, toFatalError, WorkerValidationError } from "./errorTaxonomy";
-import { deriveValidatePassFlags } from "./flow";
+import { assertSupportedSchemaVersion, deriveValidatePassFlags } from "./flow";
 import { estimateCsv, type CsvEstimate } from "./pipeline/estimateCsv";
 import { runCsv } from "./pipeline/csvPipeline";
 import { estimateXlsx, runXlsx, type XlsxEstimate } from "./pipeline/xlsxPipeline";
@@ -67,12 +67,7 @@ async function handleInit(
     req: Extract<WorkerRequest, { type: "init" }>,
     post: (m: WorkerResponse) => void
 ) {
-    if ((req.schemaVersion ?? 1) > 1) {
-        throw new WorkerValidationError(
-            "SCHEMA_VERSION_UNSUPPORTED",
-            `Unsupported schemaVersion=${req.schemaVersion}. Current supported version is 1.`
-        );
-    }
+    assertSupportedSchemaVersion(req.schemaVersion);
     if (!req.wasmUrl) {
         throw new WorkerValidationError(
             "WASM_URL_REQUIRED",

@@ -1,7 +1,7 @@
-import type { Progress, PackedError, DecodedError } from "../types";
-import { Engine } from "../engine";
-import { toAsyncIterable, type ChunkSource } from "./sources";
-import { chooseChunkSizeSmart } from "./chooseChunkSize";
+import type { Progress, PackedError, DecodedError } from "../types.js";
+import { Engine } from "../engine.js";
+import { toAsyncIterable, type ChunkSource } from "./sources.js";
+import { chooseChunkSizeSmart } from "./chooseChunkSize.js";
 
 export type ValidateCsvOptions = {
     chunkSize?: number;              // optional override
@@ -37,10 +37,18 @@ export async function validateCsv(
     const allDecoded: DecodedError[] = [];
     const normalizedParts: Uint8Array[] = [];
 
-    let lastProgress: Progress = {
+    // push_chunk returns per-call deltas; accumulate running totals here so
+    // onProgress and the returned summary report totals (per the docs).
+    const totals: Progress = {
         rowsProcessed: 0,
         errorsAdded: 0,
         done: false,
+    };
+
+    const accumulate = (delta: Progress) => {
+        totals.rowsProcessed += delta.rowsProcessed;
+        totals.errorsAdded += delta.errorsAdded;
+        totals.done = delta.done;
     };
 
     const drain = () => {
@@ -59,8 +67,8 @@ export async function validateCsv(
     for await (const chunk of iterable) {
         if (opts.signal?.aborted) throw new Error("Validation aborted");
 
-        lastProgress = engine.pushChunk(chunk, false);
-        opts.onProgress?.(lastProgress);
+        accumulate(engine.pushChunk(chunk, false));
+        opts.onProgress?.({ ...totals });
 
         // ✅ critical for large files
         drain();
@@ -69,13 +77,13 @@ export async function validateCsv(
     if (opts.signal?.aborted) throw new Error("Validation aborted");
 
     // flush
-    lastProgress = engine.pushChunk(new Uint8Array(), true);
-    opts.onProgress?.(lastProgress);
+    accumulate(engine.pushChunk(new Uint8Array(), true));
+    opts.onProgress?.({ ...totals });
 
     drain();
 
     return {
-        progress: lastProgress,
+        progress: totals,
         errorsPacked: allPacked,
         errorsDecoded: decodeErrors ? allDecoded : undefined,
         normalized:

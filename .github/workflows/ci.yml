@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-trace:
+  build-and-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -29,21 +29,48 @@ jobs:
           node-version: 20
           cache: pnpm
 
-      - name: Install
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/validator
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Rust tests
+        run: cargo test --manifest-path crates/validator/Cargo.toml
+
+      # Build before typecheck: worker/sdk type resolution needs core's dist
+      # and the generated wasm pkg, neither of which exist on a fresh checkout.
+      - name: Build (traced)
+        run: pnpm run build:trace
 
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Test
+      - name: JS tests
         run: pnpm run test
 
-      - name: Build Trace
-        run: pnpm run build:trace
+      - name: Assemble customer kit
+        run: pnpm run dist:customer
 
-      - name: Upload Build Trace
+      - name: Upload build traces
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-traces
           path: artifacts/build-traces
+
+      - name: Upload customer kit
+        uses: actions/upload-artifact@v4
+        with:
+          name: customer-kit
+          path: artifacts/import-validator-kit-*.zip

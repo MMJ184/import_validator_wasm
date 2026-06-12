@@ -11,6 +11,7 @@ const steps = [
     { name: "build-wasm", cmd: "pnpm", args: ["run", "build:wasm"] },
     { name: "build-core-pkg", cmd: "pnpm", args: ["--filter", "@import-validator/core", "run", "build:pkg"] },
     { name: "build-worker", cmd: "pnpm", args: ["--filter", "@import-validator/worker", "run", "build"] },
+    { name: "build-node", cmd: "pnpm", args: ["--filter", "@import-validator/node", "run", "build"] },
     { name: "build-sdk", cmd: "pnpm", args: ["--filter", "@import-validator/sdk", "run", "build"] },
     { name: "build-example-vite", cmd: "pnpm", args: ["--filter", "vite-ts-demo", "run", "build"] },
 ];

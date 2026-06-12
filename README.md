@@ -60,4 +60,9 @@ This is used for enterprise debugging and build regression tracking.
 ## CI
 GitHub Actions workflow:
 - `.github/workflows/ci.yml`
-- Runs typecheck + build trace and uploads trace artifacts.
+- Sets up Node + pnpm + Rust + wasm-pack, runs Rust tests, full traced build,
+  typecheck, JS tests, and assembles the customer kit.
+- Uploads build traces and the customer kit zip as artifacts.
+
+## License
+Proprietary — see `LICENSE`. Customer use requires a commercial license agreement.

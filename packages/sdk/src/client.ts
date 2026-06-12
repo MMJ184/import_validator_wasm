@@ -4,6 +4,7 @@ import type {
     ValidationFatal,
     ValidationFormat,
     ValidationMetrics,
+    ValidationProfile,
     ValidatorEvents,
     ValidatorOptions
 } from "./types.js";
@@ -13,6 +14,7 @@ import { chooseChunkSizeSmart } from "@import-validator/core";
 export class ValidatorClient {
     private worker: Worker;
     private events: ValidatorEvents;
+    private baseProfile: ValidationProfile;
 
     private isReady = false;
     private pendingValidate: { file: File; options?: ValidateFileOptions } | null = null;
@@ -20,6 +22,7 @@ export class ValidatorClient {
     constructor(opts: ValidatorOptions, events: ValidatorEvents = {}) {
         this.events = events;
         const baseProfile = opts.profile ?? "balanced";
+        this.baseProfile = baseProfile;
         const baseDefaults = profileDefaults(baseProfile);
 
         this.worker = createWorker({
@@ -93,7 +96,7 @@ export class ValidatorClient {
         const maxErrors =
             options?.maxErrors ??
             chooseMaxErrorsSmart(file.size);
-        const activeProfile = options?.profile ?? "balanced";
+        const activeProfile = options?.profile ?? this.baseProfile;
         const defaults = profileDefaults(activeProfile);
 
         const emitNormalized =

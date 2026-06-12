@@ -1,19 +1,21 @@
 {
   "name": "import-validator-wasm",
   "private": true,
+  "license": "SEE LICENSE IN LICENSE",
   "workspaces": [
     "packages/*",
     "examples/*"
   ],
   "scripts": {
-    "build": "pnpm run build:wasm && pnpm --filter @import-validator/core run build:pkg && pnpm --filter @import-validator/worker run build && pnpm --filter @import-validator/sdk run build && pnpm --filter vite-ts-demo run build",
+    "build": "pnpm run build:wasm && pnpm --filter @import-validator/core run build:pkg && pnpm --filter @import-validator/worker run build && pnpm --filter @import-validator/node run build && pnpm --filter @import-validator/sdk run build && pnpm --filter vite-ts-demo run build",
     "build:wasm": "pnpm --filter @import-validator/core run build:wasm",
     "build:trace": "node scripts/build-trace.mjs",
     "dist:customer": "node scripts/build-customer-kit.mjs",
     "dist:customer:full": "pnpm run build && pnpm run dist:customer",
     "typecheck": "pnpm -r --if-present run typecheck",
     "test": "pnpm -r --if-present run test",
-    "verify": "pnpm run typecheck && pnpm run build",
+    "test:rust": "cargo test --manifest-path crates/validator/Cargo.toml",
+    "verify": "pnpm run build && pnpm run typecheck",
     "dev:ex": "pnpm --filter vite-ts-demo run dev",
     "clean": "pnpm -r exec rimraf node_modules dist",
     "clean:all": "pnpm clean && pnpm store prune",

@@ -59,5 +59,34 @@ function withCacheBust(input: string | URL): string | URL {
 }
 
 async function initOnce(moduleOrPath: string | URL) {
+    const localBytes = await maybeReadLocalBytes(moduleOrPath);
+    if (localBytes) {
+        await initWasm({ module_or_path: localBytes as any });
+        return;
+    }
     await initWasm({ module_or_path: moduleOrPath as any });
+}
+
+/**
+ * Node.js cannot fetch() file:// URLs or bare paths, so read the wasm bytes
+ * from disk there. Returns null in browsers/workers (fetch path is used).
+ */
+async function maybeReadLocalBytes(input: string | URL): Promise<Uint8Array | null> {
+    const proc = (globalThis as any).process;
+    const isNode = !!proc?.versions?.node;
+    if (!isNode) return null;
+
+    const asString = input instanceof URL ? input.href : input;
+    if (asString.startsWith("http://") || asString.startsWith("https://")) {
+        return null;
+    }
+
+    const { readFile } = await import("node:fs/promises");
+    if (asString.startsWith("file://")) {
+        const { fileURLToPath } = await import("node:url");
+        const clean = new URL(asString);
+        clean.search = ""; // strip cache-bust params before path conversion
+        return new Uint8Array(await readFile(fileURLToPath(clean)));
+    }
+    return new Uint8Array(await readFile(asString));
 }

@@ -13,18 +13,20 @@ A high-performance browser-side CSV/Excel validation engine. The core validator 
 
 pnpm install                        # install all workspace deps
 
-# Full production build (WASM → core → worker → sdk → demo)
+# Full production build (WASM → core → worker → node → sdk → demo)
 pnpm run build
 
 # Individual steps (must run in this order)
 pnpm --filter @import-validator/core run build:wasm        # fast WASM (default)
 pnpm --filter @import-validator/core run build:wasm:full   # full WASM (enables pattern/regex features)
 pnpm --filter @import-validator/core run build:pkg         # compile core TS + copy WASM
-pnpm --filter @import-validator/worker run build
+pnpm --filter @import-validator/worker run build           # tsc + esbuild bundle (self-contained dist/worker.js)
+pnpm --filter @import-validator/node run build
 pnpm --filter @import-validator/sdk run build
 pnpm --filter vite-ts-demo run build
 
-# Type check + build gate (run before merging)
+# Build + type check gate (run before merging; build first — typecheck
+# needs the generated wasm pkg and package dists)
 pnpm run verify
 
 # Tests (builds worker first, then runs Node test runner)
@@ -34,14 +36,19 @@ pnpm --filter @import-validator/worker run test
 # Run a single test file
 node --test packages/worker/test/error-taxonomy.test.mjs   # after worker is built
 
+# Native shared library (Python / C# / Go / etc.)
+./scripts/build-native.sh                    # builds .dylib / .so / .dll for the host
+./scripts/build-native.sh --features pattern # with regex support
+cargo test                                   # Rust unit tests (native, no WASM)
+
 # Dev server (Vite demo)
 pnpm run dev:ex
 
 # Build with per-step timing logs (for release/regression)
 pnpm run build:trace
 
-# Assemble customer distribution kit
-pnpm run dist:customer         # requires prior build
+# Assemble customer distribution kit (tarballs + static worker/wasm + zip)
+pnpm run dist:customer         # requires prior build → artifacts/import-validator-kit-v<version>.zip
 pnpm run dist:customer:full    # rebuild + assemble
 ```
 
@@ -71,7 +78,12 @@ Browser App
 | `packages/core` | WASM init/retry logic, `Engine` TS wrapper, `chooseChunkSizeSmart` |
 | `packages/worker` | Worker protocol, CSV/XLSX pipelines, preflight guardrails, fatal taxonomy |
 | `packages/sdk` | `createValidator()` browser API, profile defaults, worker factory |
+| `packages/node` | Node.js server wrapper — runs WASM directly, no Web Worker |
 | `examples/vite-ts-demo` | Integration demo using SDK + Vite URL helpers |
+| `bindings/python` | Python `ctypes` wrapper for the native library |
+| `bindings/csharp` | C# P/Invoke wrapper for the native library |
+| `bindings/go` | Go `cgo` wrapper for the native library |
+| `bindings/include` | C header (`import_validator.h`) for any C-FFI language |
 
 ### Key Design Points
 
@@ -109,7 +121,9 @@ All fatal errors propagate via `onFatal(message, fatal)` where `fatal.code` is o
 
 ## Important Invariants
 
-- **Build order matters**: WASM must build before core; core before worker; worker before SDK.
+- **Build order matters**: WASM must build before core; core before worker/node; worker before SDK.
+- **`dist/worker.js` is a self-contained esbuild bundle** (no bare specifiers) so it can be hosted statically. The kit build fails if bare `@import-validator/*` imports are found in it. Library consumers import `@import-validator/worker` (index), never the bundle.
+- **Relative imports in `packages/*/src` must carry `.js` extensions** — the compiled dist is consumed directly by Node (node package, tests); extensionless specifiers break Node ESM resolution.
 - **schemaVersion**: Currently only `1` is supported. The worker rejects others immediately.
 - **Pattern feature**: Schemas with `pattern` or `regexReplacePattern` fields fail at `Engine.create()` on the fast build. Switch to the full build with `WASM_FEATURES=pattern`.
 - **XLSX limits**: Sheet XML ≤ 192 MB uncompressed; shared strings ≤ 128 MB; total decompressed ≤ 768 MB; max 20,000 ZIP entries; max compression ratio 1,000×. ZIP64 is not supported.
@@ -118,6 +132,7 @@ All fatal errors propagate via `onFatal(message, fatal)` where `fatal.code` is o
 
 ## Docs Reference
 
+- `docs/NATIVE_CLIENTS.md` — integration guide for Python, Node.js, C#, Go
 - `docs/CURRENT_FLOW.md` — authoritative runtime + build flow description
 - `docs/PRODUCT_READINESS.md` — multi-tenant policy and production guidance
 - `docs/CUSTOMER_DISTRIBUTION.md` — customer handoff and integration guide

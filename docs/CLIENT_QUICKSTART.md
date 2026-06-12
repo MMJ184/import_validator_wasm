@@ -6,18 +6,27 @@
 
 ## What You Receive
 
-After running `pnpm run dist:customer`, the `artifacts/customer-kit/` folder contains:
+The customer kit (`import-validator-kit-v<version>.zip`) contains:
 
 ```
 packages/
-  core-dist/          ← WASM loader + Engine API
-  worker-dist/        ← Web Worker bundle (worker.js + .wasm file)
-  sdk-dist/           ← Browser SDK (createValidator)
+  import-validator-core-<version>.tgz     ← WASM loader + Engine API
+  import-validator-worker-<version>.tgz   ← Worker package (types + bundled worker)
+  import-validator-sdk-<version>.tgz      ← Browser SDK (createValidator)
+  import-validator-node-<version>.tgz     ← Optional: Node.js server-side wrapper
+static/
+  worker.js                               ← Self-contained Web Worker (no bundler needed)
+  import_validator_wasm_bg.wasm           ← WASM engine binary
 docs/
-  validation-config.schema.json   ← Full schema contract reference
-  customer-profiles.json          ← Example tenant schemas
-  CUSTOMER_DISTRIBUTION.md        ← This integration guide (short form)
-manifest.json
+  CLIENT_QUICKSTART.md                    ← This guide
+  SCHEMA_REFERENCE.md                     ← Full schema field reference
+  SDK_API.md                              ← SDK API and event reference
+  CUSTOMER_DISTRIBUTION.md                ← Asset hosting and deployment guide
+  NATIVE_CLIENTS.md                       ← Node.js / Python / C# / Go server-side guide
+  validation-config.schema.json           ← Machine-readable schema contract
+  customer-profiles.json                  ← Example tenant schemas
+LICENSE
+manifest.json                             ← Version, git SHA, contents
 ```
 
 ---
@@ -26,35 +35,39 @@ manifest.json
 
 | Requirement | Notes |
 |---|---|
-| Modern browser | Chrome 90+, Firefox 90+, Safari 15+, Edge 90+ |
-| Web Worker support | Required — validation runs off the main thread |
+| Modern browser | Chrome 90+, Edge 90+, Safari 15+, Firefox 114+ |
+| Module Worker support | Required — validation runs off the main thread |
 | HTTPS or localhost | Required for WebAssembly |
-| Bundler | Vite (recommended), Webpack 5, Rollup, or static hosting |
+| Bundler | Optional — static hosting works without one |
 
 ---
 
-## 1. Host the Assets
+## 1. Install the SDK
 
-Copy these two files to a path your app can reach (e.g. `/assets/`):
-
-| File | Source path in kit |
-|---|---|
-| `worker.js` | `worker-dist/worker.js` |
-| `import_validator_wasm_bg.wasm` | `core-dist/wasm/pkg/import_validator_wasm_bg.wasm` |
-
-They **must** be served from the same origin as your app (or with correct CORS headers).
-
----
-
-## 2. Install the SDK
-
-If installing from the kit as local packages:
+Install all package tarballs **in a single command** so they resolve each other:
 
 ```bash
-npm install ./sdk-dist ./core-dist ./worker-dist
-# or with pnpm
-pnpm add ./sdk-dist ./core-dist ./worker-dist
+npm install ./packages/import-validator-core-0.1.0.tgz \
+            ./packages/import-validator-worker-0.1.0.tgz \
+            ./packages/import-validator-sdk-0.1.0.tgz
+# or with pnpm: pnpm add ./packages/...(same three files)
 ```
+
+> Server-side validation in Node.js? Also install `import-validator-node-<version>.tgz`
+> and see `docs/NATIVE_CLIENTS.md`.
+
+---
+
+## 2. Host the Static Assets
+
+Copy these two files from `static/` to a path your app serves (e.g. `/assets/`):
+
+| File | Purpose |
+|---|---|
+| `worker.js` | Self-contained Web Worker — no bundling required |
+| `import_validator_wasm_bg.wasm` | WASM engine binary |
+
+They **must** be served from the same origin as your app (or with correct CORS headers).
 
 ---
 

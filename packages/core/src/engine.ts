@@ -1,5 +1,5 @@
-import {PackedError, Progress} from "./types";
-import {initValidatorWasm} from "./wasm";
+import {PackedError, Progress} from "./types.js";
+import {initValidatorWasm} from "./wasm/index.js";
 
 let wasmReady: Promise<any> | null = null;
 

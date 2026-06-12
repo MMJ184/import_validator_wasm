@@ -2,7 +2,12 @@
   "name": "@import-validator/core",
   "version": "0.1.0",
   "private": true,
+  "description": "WASM loader, Engine API, and shared helpers for ImportValidator",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
+  "files": [
+    "dist"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
