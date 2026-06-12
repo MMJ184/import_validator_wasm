@@ -1,6 +1,8 @@
 // crates/validator/src/lib.rs
 mod schema;
 mod errors;
+#[cfg(not(target_arch = "wasm32"))]
+mod ffi;
 
 use errors::{ColKind, ErrorCode, PackedError};
 use schema::{ColumnModifiers, ColumnType, DateFormat, Progress, Schema};
