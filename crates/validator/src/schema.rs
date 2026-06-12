@@ -49,6 +49,10 @@ pub struct Schema {
 
     #[serde(default)]
     pub unique_groups: Vec<UniqueGroupSpec>,
+
+    /// Match CSV header names to schema columns ignoring case (opt-in).
+    #[serde(default)]
+    pub case_insensitive_headers: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

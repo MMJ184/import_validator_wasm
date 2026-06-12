@@ -14,10 +14,15 @@ The full machine-readable contract is in `validation-config.schema.json`.
   delimiter?: string | number, // default: "," — single char or ASCII byte value
   columns: ColumnSpec[],       // required — ordered list of column rules
   failOnExtraColumns?: boolean,// default: false — emit ExtraColumn error for unrecognized columns
+  caseInsensitiveHeaders?: boolean, // default: false — match header names to schema columns ignoring case
   totalColumns?: number,       // strict total column count check (header + data rows)
   uniqueGroups?: UniqueGroup[] // composite uniqueness rules across multiple columns
 }
 ```
+
+### `caseInsensitiveHeaders`
+
+When `true`, a CSV header `Email` (or `EMAIL`) matches a schema column named `email`. Engine init fails if two schema column names collide ignoring case. Default is exact matching.
 
 ### `delimiter`
 
@@ -35,7 +40,7 @@ Each entry in `columns` maps to one column in the CSV/Excel file (matched by nam
 | `type` | string | required | Data type — see types below |
 | `required` | boolean | `false` | Error if value is empty |
 | `nullable` | boolean | `false` | When `true`, empty values are allowed even if `required: true` |
-| `unique` | boolean | `false` | Error if the same value appears more than once |
+| `unique` | boolean | `false` | Error if the same value appears more than once. Tracks 128-bit fingerprints, not values — memory is ~24 bytes per distinct value regardless of value length |
 | `minLen` | integer | — | Minimum character length |
 | `maxLen` | integer | — | Maximum character length |
 | `allowed` | string[] | — | Allowlist of valid values (exact match after modifiers) |

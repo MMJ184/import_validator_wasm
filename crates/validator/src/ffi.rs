@@ -48,12 +48,11 @@ pub unsafe extern "C" fn iv_engine_new(
             return ptr::null_mut();
         }
     };
-    match ValidatorEngine::new(schema_str, max_errors, emit_normalized != 0) {
+    // new_internal returns String errors — the JsValue-based constructor
+    // aborts the process on non-wasm targets and must never run here.
+    match ValidatorEngine::new_internal(schema_str, max_errors, emit_normalized != 0) {
         Ok(engine) => Box::into_raw(Box::new(engine)),
-        Err(jsval) => {
-            let msg = jsval
-                .as_string()
-                .unwrap_or_else(|| "engine initialization failed".to_string());
+        Err(msg) => {
             write_err(err_buf, err_buf_len, &msg);
             ptr::null_mut()
         }

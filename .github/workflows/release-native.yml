@@ -1,0 +1,84 @@
+name: Release Native Libraries
+
+# Builds the native shared library for every supported platform so customers
+# never need a Rust toolchain. Runs on version tags (attaches binaries to the
+# GitHub Release) and on demand via workflow_dispatch (artifacts only).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}${{ matrix.features && ' (pattern)' || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+            lib: libimport_validator_wasm.so
+            out: import-validator-linux-x86_64.so
+          - os: macos-latest
+            name: macos-arm64
+            lib: libimport_validator_wasm.dylib
+            out: import-validator-macos-arm64.dylib
+          - os: windows-latest
+            name: windows-x86_64
+            lib: import_validator_wasm.dll
+            out: import-validator-windows-x86_64.dll
+          - os: ubuntu-latest
+            name: linux-x86_64
+            features: pattern
+            lib: libimport_validator_wasm.so
+            out: import-validator-linux-x86_64-pattern.so
+          - os: macos-latest
+            name: macos-arm64
+            features: pattern
+            lib: libimport_validator_wasm.dylib
+            out: import-validator-macos-arm64-pattern.dylib
+          - os: windows-latest
+            name: windows-x86_64
+            features: pattern
+            lib: import_validator_wasm.dll
+            out: import-validator-windows-x86_64-pattern.dll
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/validator
+
+      - name: Build
+        shell: bash
+        run: |
+          cargo build --release --manifest-path crates/validator/Cargo.toml \
+            ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+          mkdir -p out
+          cp "crates/validator/target/release/${{ matrix.lib }}" "out/${{ matrix.out }}"
+          cp bindings/include/import_validator.h out/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.out }}
+          path: out/
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/${{ matrix.out }}
+            out/import_validator.h

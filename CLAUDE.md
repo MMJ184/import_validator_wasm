@@ -47,6 +47,9 @@ pnpm run dev:ex
 # Build with per-step timing logs (for release/regression)
 pnpm run build:trace
 
+# Throughput benchmark (rewrites docs/BENCHMARKS.md; needs prior build)
+pnpm run bench
+
 # Assemble customer distribution kit (tarballs + static worker/wasm + zip)
 pnpm run dist:customer         # requires prior build → artifacts/import-validator-kit-v<version>.zip
 pnpm run dist:customer:full    # rebuild + assemble
@@ -105,6 +108,7 @@ Schema JSON is passed directly to the Rust engine. The full schema shape is in `
 
 - `hasHeaders` (bool, required)
 - `delimiter` (char or byte, default `,`)
+- `caseInsensitiveHeaders` (bool, default false) — match header names ignoring case
 - `columns[]` — each with `name`, `type` (`string|int|decimal|float|double|number|email|date`), `required`, `nullable`, `unique`, `allowed[]`, `minLen`, `maxLen`, `precision`, `strictPrecision`, `dateFormat`, `pattern`, `modifiers`
 - `uniqueGroups[]` — composite uniqueness across multiple columns
 - `failOnExtraColumns`, `totalColumns`

@@ -29,3 +29,15 @@ console_error_panic_hook = { version = "0.1", optional = true }
 default = []
 dev = ["console_error_panic_hook"]
 pattern = ["dep:regex"]
+
+# Shipped binaries (WASM + native cdylib) — favor throughput and small size.
+# Tests are unaffected: cargo test uses the dev/test profile.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O4"]

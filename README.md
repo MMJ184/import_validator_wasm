@@ -48,6 +48,7 @@ This is used for enterprise debugging and build regression tracking.
 - Schema field reference: `docs/SCHEMA_REFERENCE.md`
 - SDK API reference: `docs/SDK_API.md`
 - Customer distribution guide: `docs/CUSTOMER_DISTRIBUTION.md`
+- Measured throughput: `docs/BENCHMARKS.md` (regenerate with `pnpm run bench`)
 
 ## Internal Docs
 - Current implementation flow: `docs/CURRENT_FLOW.md`

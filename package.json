@@ -15,6 +15,7 @@
     "typecheck": "pnpm -r --if-present run typecheck",
     "test": "pnpm -r --if-present run test",
     "test:rust": "cargo test --manifest-path crates/validator/Cargo.toml",
+    "bench": "node scripts/bench.mjs",
     "verify": "pnpm run build && pnpm run typecheck",
     "dev:ex": "pnpm --filter vite-ts-demo run dev",
     "clean": "pnpm -r exec rimraf node_modules dist",

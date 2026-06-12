@@ -18,6 +18,7 @@
           ]
         },
         "failOnExtraColumns": { "type": "boolean" },
+        "caseInsensitiveHeaders": { "type": "boolean", "default": false },
         "totalColumns": { "type": "integer", "minimum": 1 },
         "uniqueGroups": {
           "type": "array",

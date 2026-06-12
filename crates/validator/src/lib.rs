@@ -10,7 +10,9 @@ use schema::{ColumnModifiers, ColumnType, DateFormat, Progress, Schema};
 use csv_core::{ReadRecordResult, Reader, ReaderBuilder, Terminator};
 use rust_decimal::Decimal;
 use rust_decimal::RoundingStrategy;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::str;
 use wasm_bindgen::prelude::*;
 #[cfg(feature = "pattern")]
@@ -24,6 +26,12 @@ pub struct ValidatorEngine {
     // Reused output buffers for csv-core
     out: Vec<u8>,
     ends: Vec<usize>,
+    // Bytes/field-ends already written into out/ends for a record that is
+    // still incomplete (spans chunk boundaries). csv-core resumes mid-record;
+    // we must append after these offsets, not restart at 0, or every row that
+    // straddles a chunk boundary gets corrupted.
+    partial_out: usize,
+    partial_ends: usize,
 
     // Header state
     header_parsed: bool,
@@ -38,6 +46,8 @@ pub struct ValidatorEngine {
     schema_col_names: Vec<String>,
     // Fast header mapping: schema column name -> schema index
     schema_name_to_index: HashMap<String, usize>,
+    // Lowercased variant, present only when schema.caseInsensitiveHeaders=true
+    schema_name_to_index_ci: Option<HashMap<String, usize>>,
 
     // For JS: input (CSV) header names in input order (only when has_headers=true)
     input_header_names: Vec<String>,
@@ -60,12 +70,15 @@ pub struct ValidatorEngine {
     // Optional allowed-value set per schema column (for O(1) membership checks)
     allowed_sets: Vec<Option<HashSet<String>>>,
 
-    // Optional uniqueness set per schema column (enabled when column.unique=true)
-    unique_sets: Vec<Option<HashSet<String>>>,
+    // Optional uniqueness set per schema column (enabled when column.unique=true).
+    // Stores 128-bit fingerprints, not the values themselves: memory stays
+    // ~24 bytes per distinct value regardless of value length, which keeps
+    // unique columns viable on very large files inside 32-bit WASM memory.
+    unique_sets: Vec<Option<HashSet<u128>>>,
 
     // Composite uniqueness groups (row-level key across multiple columns).
     unique_group_indices: Vec<Vec<usize>>,
-    unique_group_sets: Vec<HashSet<String>>,
+    unique_group_sets: Vec<HashSet<u128>>,
 
     // Precompiled regex patterns by schema column index (only in full/pattern build)
     #[cfg(feature = "pattern")]
@@ -98,11 +111,23 @@ impl ValidatorEngine {
         max_errors: u32,
         emit_normalized: bool,
     ) -> Result<ValidatorEngine, JsValue> {
+        Self::new_internal(schema_json, max_errors, emit_normalized)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Constructor with plain String errors. Native (FFI) callers must use
+    /// this: constructing a JsValue on a non-wasm target aborts the process.
+    /// Not exported by wasm-bindgen (not `pub`-visible to the macro).
+    pub(crate) fn new_internal(
+        schema_json: &str,
+        max_errors: u32,
+        emit_normalized: bool,
+    ) -> Result<ValidatorEngine, String> {
         #[cfg(feature = "dev")]
         console_error_panic_hook::set_once();
 
         let schema: Schema = serde_json::from_str(schema_json)
-            .map_err(|e| JsValue::from_str(&format!("Invalid schema JSON: {e}")))?;
+            .map_err(|e| format!("Invalid schema JSON: {e}"))?;
 
         #[cfg(feature = "pattern")]
         let mut patterns = Vec::with_capacity(schema.columns.len());
@@ -111,24 +136,24 @@ impl ValidatorEngine {
         for (i, c) in schema.columns.iter().enumerate() {
             if let Some(p) = c.pattern.as_ref() {
                 if p.len() > 256 {
-                    return Err(JsValue::from_str(&format!(
+                    return Err(format!(
                         "Pattern too long in schema column {} ({}). Max 256 chars.",
                         i, c.name
-                    )));
+                    ));
                 }
                 #[cfg(feature = "pattern")]
                 {
                     let re = Regex::new(p).map_err(|e| {
-                        JsValue::from_str(&format!("Invalid regex in schema column {} ({}): {e}", i, c.name))
+                        format!("Invalid regex in schema column {} ({}): {e}", i, c.name)
                     })?;
                     patterns.push(Some(re));
                 }
                 #[cfg(not(feature = "pattern"))]
                 {
-                    return Err(JsValue::from_str(&format!(
+                    return Err(format!(
                         "Pattern validation requested in column {} ({}), but this build disables pattern feature for maximum performance.",
                         i, c.name
-                    )));
+                    ));
                 }
             } else {
                 #[cfg(feature = "pattern")]
@@ -139,11 +164,10 @@ impl ValidatorEngine {
                 #[cfg(feature = "pattern")]
                 {
                     let re = Regex::new(replace_pattern).map_err(|e| {
-                        JsValue::from_str(&format!(
+                        format!(
                             "Invalid regexReplacePattern in schema column {} ({}): {e}",
-                            i,
-                            c.name
-                        ))
+                            i, c.name
+                        )
                     })?;
                     let replacement = c.modifiers.regex_replace_with.clone().unwrap_or_default();
                     regex_replace_rules.push(Some((re, replacement)));
@@ -151,10 +175,10 @@ impl ValidatorEngine {
                 #[cfg(not(feature = "pattern"))]
                 {
                     let _ = replace_pattern;
-                    return Err(JsValue::from_str(&format!(
+                    return Err(format!(
                         "regexReplacePattern requested in column {} ({}), but this build disables pattern feature.",
                         i, c.name
-                    )));
+                    ));
                 }
             } else {
                 #[cfg(feature = "pattern")]
@@ -189,12 +213,26 @@ impl ValidatorEngine {
                 }
             })
             .collect::<Vec<_>>();
+        let schema_name_to_index_ci = if schema.case_insensitive_headers {
+            let mut map = HashMap::with_capacity(schema.columns.len());
+            for (i, c) in schema.columns.iter().enumerate() {
+                if map.insert(c.name.to_lowercase(), i).is_some() {
+                    return Err(format!(
+                        "caseInsensitiveHeaders=true, but schema column names collide ignoring case: \"{}\"",
+                        c.name
+                    ));
+                }
+            }
+            Some(map)
+        } else {
+            None
+        };
         let unique_sets = schema
             .columns
             .iter()
             .map(|c| {
                 if c.unique {
-                    Some(HashSet::<String>::new())
+                    Some(HashSet::<u128>::new())
                 } else {
                     None
                 }
@@ -203,17 +241,17 @@ impl ValidatorEngine {
         let mut unique_group_indices = Vec::with_capacity(schema.unique_groups.len());
         for (gi, group) in schema.unique_groups.iter().enumerate() {
             if group.columns.is_empty() {
-                return Err(JsValue::from_str(&format!(
+                return Err(format!(
                     "uniqueGroups[{gi}] must include at least one column."
-                )));
+                ));
             }
 
             let mut resolved = Vec::with_capacity(group.columns.len());
             for col_name in &group.columns {
                 let Some(idx) = schema_name_to_index.get(col_name).copied() else {
-                    return Err(JsValue::from_str(&format!(
+                    return Err(format!(
                         "uniqueGroups[{gi}] references unknown column \"{col_name}\""
-                    )));
+                    ));
                 };
                 resolved.push(idx);
             }
@@ -221,7 +259,7 @@ impl ValidatorEngine {
             unique_group_indices.push(resolved);
         }
         let unique_group_sets = (0..unique_group_indices.len())
-            .map(|_| HashSet::<String>::new())
+            .map(|_| HashSet::<u128>::new())
             .collect::<Vec<_>>();
 
         // Pre-allocate per-row value scratch buffer.
@@ -260,11 +298,14 @@ impl ValidatorEngine {
             rdr,
             out: vec![0u8; 64 * 1024],
             ends: vec![0usize; 256],
+            partial_out: 0,
+            partial_ends: 0,
             header_parsed,
             input_to_schema: Vec::new(),
             schema_to_input,
             schema_col_names,
             schema_name_to_index,
+            schema_name_to_index_ci,
             input_header_names: Vec::new(),
             data_row: 0,
             errors: VecDeque::new(),
@@ -373,38 +414,50 @@ impl ValidatorEngine {
 
 impl ValidatorEngine {
     fn parse_slice(&mut self, mut input: &[u8]) {
-        while !input.is_empty() {
-            let (res, nin, nout, nends) =
-                self.rdr.read_record(input, &mut self.out, &mut self.ends);
+        loop {
+            // Resume after any partial record from previous chunks: csv-core
+            // keeps parser state, so we must keep appending to out/ends.
+            let (res, nin, nout, nends) = self.rdr.read_record(
+                input,
+                &mut self.out[self.partial_out..],
+                &mut self.ends[self.partial_ends..],
+            );
             input = &input[nin..];
+            self.partial_out += nout;
+            self.partial_ends += nends;
 
             match res {
                 ReadRecordResult::Record => {
-                    // Avoid borrowing self.out/self.ends across &mut self call:
-                    let nout_local = nout;
-                    let nends_local = nends;
+                    let out_len = self.partial_out;
+                    let ends_len = self.partial_ends;
+                    self.partial_out = 0;
+                    self.partial_ends = 0;
 
+                    // Avoid borrowing self.out/self.ends across &mut self call:
                     let out_buf = std::mem::take(&mut self.out);
                     let ends_buf = std::mem::take(&mut self.ends);
 
-                    self.handle_record(&out_buf[..nout_local], &ends_buf[..nends_local]);
+                    self.handle_record(&out_buf[..out_len], &ends_buf[..ends_len]);
 
                     self.out = out_buf;
                     self.ends = ends_buf;
 
-                    if self.hit_error_limit() {
+                    if self.hit_error_limit() || input.is_empty() {
                         return;
                     }
                 }
                 ReadRecordResult::InputEmpty => {
-                    // Need more bytes; just return and continue next chunk (reader keeps state)
+                    // Need more bytes; partial_out/partial_ends carry the
+                    // incomplete record into the next chunk.
                     return;
                 }
                 ReadRecordResult::OutputFull => {
-                    self.out.resize(self.out.len() * 2, 0);
+                    let n = self.out.len().max(64) * 2;
+                    self.out.resize(n, 0);
                 }
                 ReadRecordResult::OutputEndsFull => {
-                    self.ends.resize(self.ends.len() * 2, 0);
+                    let n = self.ends.len().max(16) * 2;
+                    self.ends.resize(n, 0);
                 }
                 ReadRecordResult::End => return,
             }
@@ -413,17 +466,25 @@ impl ValidatorEngine {
 
     fn flush_end(&mut self) {
         loop {
-            let (res, _nin, nout, nends) = self.rdr.read_record(&[], &mut self.out, &mut self.ends);
+            let (res, _nin, nout, nends) = self.rdr.read_record(
+                &[],
+                &mut self.out[self.partial_out..],
+                &mut self.ends[self.partial_ends..],
+            );
+            self.partial_out += nout;
+            self.partial_ends += nends;
 
             match res {
                 ReadRecordResult::Record => {
-                    let nout_local = nout;
-                    let nends_local = nends;
+                    let out_len = self.partial_out;
+                    let ends_len = self.partial_ends;
+                    self.partial_out = 0;
+                    self.partial_ends = 0;
 
                     let out_buf = std::mem::take(&mut self.out);
                     let ends_buf = std::mem::take(&mut self.ends);
 
-                    self.handle_record(&out_buf[..nout_local], &ends_buf[..nends_local]);
+                    self.handle_record(&out_buf[..out_len], &ends_buf[..ends_len]);
 
                     self.out = out_buf;
                     self.ends = ends_buf;
@@ -433,10 +494,12 @@ impl ValidatorEngine {
                     }
                 }
                 ReadRecordResult::OutputFull => {
-                    self.out.resize(self.out.len() * 2, 0);
+                    let n = self.out.len().max(64) * 2;
+                    self.out.resize(n, 0);
                 }
                 ReadRecordResult::OutputEndsFull => {
-                    self.ends.resize(self.ends.len() * 2, 0);
+                    let n = self.ends.len().max(16) * 2;
+                    self.ends.resize(n, 0);
                 }
                 ReadRecordResult::InputEmpty => continue,
                 ReadRecordResult::End => break,
@@ -596,7 +659,11 @@ impl ValidatorEngine {
         self.schema_to_input = vec![None; self.schema.columns.len()];
 
         for (input_i, nm) in input_names.iter().enumerate() {
-            if let Some(schema_idx) = self.schema_name_to_index.get(nm).copied() {
+            let schema_idx = match &self.schema_name_to_index_ci {
+                Some(ci) => ci.get(nm.to_lowercase().as_str()).copied(),
+                None => self.schema_name_to_index.get(nm).copied(),
+            };
+            if let Some(schema_idx) = schema_idx {
                 self.input_to_schema[input_i] = Some(schema_idx);
                 self.schema_to_input[schema_idx] = Some(input_i);
             }
@@ -782,7 +849,7 @@ impl ValidatorEngine {
 
         if col.unique {
             if let Some(unique_set) = self.unique_sets.get_mut(schema_idx).and_then(|x| x.as_mut()) {
-                if !unique_set.insert(canonical.clone()) {
+                if !unique_set.insert(fingerprint128(canonical.as_str())) {
                     self.push_err(
                         self.data_row,
                         schema_idx as u32,
@@ -871,7 +938,8 @@ impl ValidatorEngine {
                 continue;
             }
 
-            if self.unique_group_sets[gi].contains(self.composite_key_buf.as_str()) {
+            let key = fingerprint128(self.composite_key_buf.as_str());
+            if !self.unique_group_sets[gi].insert(key) {
                 self.push_err(
                     self.data_row,
                     col_for_error as u32,
@@ -880,7 +948,6 @@ impl ValidatorEngine {
                 );
                 return;
             }
-            self.unique_group_sets[gi].insert(self.composite_key_buf.clone());
         }
     }
 
@@ -915,6 +982,21 @@ impl ValidatorEngine {
     fn hit_error_limit(&self) -> bool {
         (self.errors.len() as u32) >= self.max_errors
     }
+}
+
+/// 128-bit content fingerprint for uniqueness tracking: two independently
+/// seeded 64-bit SipHash values. Collision odds at 10M distinct values are
+/// ~1e-19 — far below hardware error rates. Lets unique columns track
+/// fingerprints instead of owning every value (a 200 MB file with a unique
+/// column previously kept every cell value alive in WASM memory).
+fn fingerprint128(value: &str) -> u128 {
+    let mut h1 = DefaultHasher::new();
+    1u8.hash(&mut h1);
+    value.hash(&mut h1);
+    let mut h2 = DefaultHasher::new();
+    2u8.hash(&mut h2);
+    value.hash(&mut h2);
+    ((h1.finish() as u128) << 64) | h2.finish() as u128
 }
 
 fn trim_ascii(mut b: &[u8]) -> &[u8] {
@@ -1158,23 +1240,35 @@ fn validate_normalize_decimal(s: &str, precision: u32, strict: bool) -> Result<S
 }
 
 fn is_valid_email(s: &str) -> bool {
-    let at = match s.find('@') {
-        Some(i) => i,
-        None => return false,
-    };
+    // Heuristic validation: practical gates without a full RFC 5322 parser.
+    if s.len() > 254 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    // Reject ASCII whitespace and control characters anywhere. Multi-byte
+    // UTF-8 sequences are >= 0x80, so international addresses still pass.
+    if bytes.iter().any(|&b| b <= b' ') {
+        return false;
+    }
+    let mut at = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'@' {
+            if at.is_some() {
+                return false; // exactly one '@'
+            }
+            at = Some(i);
+        }
+    }
+    let Some(at) = at else { return false };
     if at == 0 || at + 1 >= s.len() {
         return false;
     }
 
-    let local = &s[..at];
     let domain = &s[at + 1..];
-    if local.is_empty() || domain.is_empty() {
-        return false;
-    }
     if !domain.contains('.') {
         return false;
     }
-    if domain.starts_with('.') || domain.ends_with('.') {
+    if domain.starts_with('.') || domain.ends_with('.') || domain.contains("..") {
         return false;
     }
 
@@ -1303,7 +1397,7 @@ mod tests {
         })
         .to_string();
 
-        let mut engine = ValidatorEngine::new(&schema_json, 1000, false).expect("engine init");
+        let mut engine = ValidatorEngine::new_internal(&schema_json, 1000, false).expect("engine init");
         let csv = b"email\n Alice@Example.com \nalice@example.com\n";
         engine.parse_slice(csv);
         engine.flush_end();
@@ -1340,7 +1434,7 @@ mod tests {
         })
         .to_string();
 
-        let mut engine = ValidatorEngine::new(&schema_json, 1000, true).expect("engine init");
+        let mut engine = ValidatorEngine::new_internal(&schema_json, 1000, true).expect("engine init");
         engine.parse_slice(b"   Alice   Doe  ,12.345\n");
         engine.flush_end();
 
@@ -1370,7 +1464,7 @@ mod tests {
         })
         .to_string();
 
-        let mut engine = ValidatorEngine::new(&schema_json, 1000, true).expect("engine init");
+        let mut engine = ValidatorEngine::new_internal(&schema_json, 1000, true).expect("engine init");
         engine.parse_slice(b"1.01\n");
         engine.flush_end();
 
@@ -1402,7 +1496,7 @@ mod tests {
         })
         .to_string();
 
-        let mut engine = ValidatorEngine::new(&schema_json, 1000, true).expect("engine init");
+        let mut engine = ValidatorEngine::new_internal(&schema_json, 1000, true).expect("engine init");
         engine.parse_slice(b"  j0hn   d0e   \n");
         engine.flush_end();
 
@@ -1432,7 +1526,7 @@ mod tests {
         })
         .to_string();
 
-        let mut engine = ValidatorEngine::new(&schema_json, 1000, false).expect("engine init");
+        let mut engine = ValidatorEngine::new_internal(&schema_json, 1000, false).expect("engine init");
         engine.parse_slice(b"n/a\n");
         engine.flush_end();
 
@@ -1462,13 +1556,117 @@ mod tests {
         })
         .to_string();
 
-        let mut engine = ValidatorEngine::new(&schema_json, 1000, false).expect("engine init");
+        let mut engine = ValidatorEngine::new_internal(&schema_json, 1000, false).expect("engine init");
         let csv = b"customerId,email\n1,A@EXAMPLE.COM\n1,a@example.com\n";
         engine.parse_slice(csv);
         engine.flush_end();
 
         let codes = take_error_codes(&mut engine);
         assert_eq!(count_code(&codes, ErrorCode::DuplicateCombination as u8), 1);
+    }
+
+    #[test]
+    fn records_spanning_chunk_boundaries_are_not_corrupted() {
+        let schema_json = json!({
+            "hasHeaders": true,
+            "columns": [
+                { "name": "id", "type": "int", "required": true, "unique": true },
+                { "name": "email", "type": "email", "required": true },
+                { "name": "name", "type": "string", "required": true, "minLen": 2 }
+            ]
+        })
+        .to_string();
+
+        let mut csv = String::from("id,email,name\n");
+        for i in 1..=200 {
+            csv.push_str(&format!("{i},user{i}@example.com,\"Person {i}\"\n"));
+        }
+
+        // Every chunk size must yield identical, error-free results — records
+        // routinely straddle chunk boundaries at small sizes.
+        for chunk_size in [1usize, 2, 3, 7, 19, 64, 1024] {
+            let mut engine =
+                ValidatorEngine::new_internal(&schema_json, 10_000, false).expect("engine init");
+            for chunk in csv.as_bytes().chunks(chunk_size) {
+                engine.parse_slice(chunk);
+            }
+            engine.flush_end();
+
+            let codes = take_error_codes(&mut engine);
+            assert!(
+                codes.is_empty(),
+                "chunk_size={chunk_size}: expected no errors, got {codes:?}"
+            );
+            assert_eq!(engine.data_row, 200, "chunk_size={chunk_size}: row count");
+        }
+    }
+
+    #[test]
+    fn email_validation_rejects_common_invalid_shapes() {
+        assert!(is_valid_email("a@b.com"));
+        assert!(is_valid_email("first.last+tag@sub.example.co"));
+        assert!(!is_valid_email("a b@c.com"));
+        assert!(!is_valid_email("a@b@c.com"));
+        assert!(!is_valid_email("a@b..com"));
+        assert!(!is_valid_email("a@b."));
+        assert!(!is_valid_email("@b.com"));
+        assert!(!is_valid_email("a@"));
+        assert!(!is_valid_email("a@nodot"));
+        assert!(!is_valid_email("a\t@b.com"));
+        let long = format!("{}@example.com", "x".repeat(250));
+        assert!(!is_valid_email(&long));
+    }
+
+    #[test]
+    fn case_insensitive_headers_match_schema_columns() {
+        let schema_json = json!({
+            "hasHeaders": true,
+            "caseInsensitiveHeaders": true,
+            "columns": [
+                { "name": "email", "type": "email", "required": true }
+            ]
+        })
+        .to_string();
+
+        let mut engine = ValidatorEngine::new_internal(&schema_json, 1000, false).expect("engine init");
+        engine.parse_slice(b"EMAIL\na@b.com\n");
+        engine.flush_end();
+
+        let codes = take_error_codes(&mut engine);
+        assert!(codes.is_empty(), "expected no errors, got {codes:?}");
+    }
+
+    #[test]
+    fn header_matching_stays_exact_by_default() {
+        let schema_json = json!({
+            "hasHeaders": true,
+            "columns": [
+                { "name": "email", "type": "email", "required": true }
+            ]
+        })
+        .to_string();
+
+        let mut engine = ValidatorEngine::new_internal(&schema_json, 1000, false).expect("engine init");
+        engine.parse_slice(b"EMAIL\na@b.com\n");
+        engine.flush_end();
+
+        let codes = take_error_codes(&mut engine);
+        assert_eq!(count_code(&codes, ErrorCode::MissingRequiredColumn as u8), 1);
+    }
+
+    #[test]
+    fn case_colliding_columns_rejected_with_ci_headers() {
+        let schema_json = json!({
+            "hasHeaders": true,
+            "caseInsensitiveHeaders": true,
+            "columns": [
+                { "name": "email", "type": "email" },
+                { "name": "Email", "type": "string" }
+            ]
+        })
+        .to_string();
+
+        assert!(ValidatorEngine::new_internal(&schema_json, 1000, false).is_err());
     }
 
     fn take_error_codes(engine: &mut ValidatorEngine) -> Vec<u8> {

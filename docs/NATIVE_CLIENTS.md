@@ -4,7 +4,23 @@ ImportValidator ships a browser-side WebAssembly SDK and a **native shared libra
 
 ---
 
-## Build the native library
+## Get the native library
+
+### Option A — Prebuilt binaries (no Rust required)
+
+Every tagged release (and any manual run of the *Release Native Libraries*
+workflow) produces prebuilt libraries for Linux x86_64, macOS arm64, and
+Windows x86_64 — each in a default and a `-pattern` (regex-enabled) variant —
+plus the C header. Download from the GitHub Release assets (or the workflow
+artifacts) and point your binding at the file:
+
+| Platform | Asset |
+|---|---|
+| Linux x86_64 | `import-validator-linux-x86_64.so` |
+| macOS arm64 | `import-validator-macos-arm64.dylib` |
+| Windows x86_64 | `import-validator-windows-x86_64.dll` |
+
+### Option B — Build from source
 
 **Prerequisite**: Rust toolchain installed (`curl https://sh.rustup.rs | sh`).
 
