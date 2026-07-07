@@ -71,8 +71,15 @@ This document defines multi-customer production guidance for CSV and Excel inges
   - expected throughput range
   - timeout/limit behavior
 
-## Excel Strategy (Separate Path)
-- Excel routing is explicit (`format=excel`) and isolated from CSV fast path.
-- `.xlsx` parsing is enabled in worker using a separate pipeline.
-- `.xls` legacy binary files are rejected with a clear error.
-- CSV performance path remains unchanged for `.csv` uploads.
+## Excel Strategy
+- Excel routing is explicit (`format=excel`, auto-detected by extension) and
+  runs in the Rust core: the worksheet streams through the SAME validation
+  path as CSV — identical error codes, modifiers, and normalized output.
+- Available on every surface: browser worker, Node
+  (`validateXlsxFile/Buffer/Stream`), Python/C#/Go/Rust (one-shot
+  `validate_xlsx_bytes`).
+- Container guardrails are enforced identically everywhere: ≤20,000 ZIP
+  entries, sheet XML ≤192 MB, shared strings ≤128 MB, total decompressed
+  ≤768 MB, compression ratio ≤1000×, no ZIP64; `.xls` is rejected.
+- Number formats are not applied (cells validate their raw stored values);
+  dates must be stored as ISO text to satisfy `date` columns.

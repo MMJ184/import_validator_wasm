@@ -1,0 +1,22 @@
+# Copyright (c) 2025-2026 Maulik Mangukiya. All rights reserved. See LICENSE.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "import-validator"
+version = "0.2.0"
+description = "Python bindings for the ImportValidator native CSV/XLSX validation engine"
+readme = { text = "Python ctypes bindings for the ImportValidator native library (libimport_validator). See docs/NATIVE_CLIENTS.md in the source repository.", content-type = "text/markdown" }
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+authors = [{ name = "Maulik Mangukiya" }]
+dependencies = []
+classifiers = [
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[tool.setuptools]
+py-modules = ["import_validator"]

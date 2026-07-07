@@ -34,10 +34,17 @@ This document defines project-level standards for enterprise maintenance and rel
 - Use `summary.json` for machine processing and `summary.md` for human review.
 
 ## 6) CI Standards
-- Workflow: `.github/workflows/ci.yml`
-- CI gates:
-  - typecheck
-  - traced build
+- Workflows: `.github/workflows/ci.yml` (every push/PR) and
+  `.github/workflows/release-native.yml` (tags, with a test gate).
+- CI gates (build-and-test job):
+  - `cargo fmt --check` and `cargo clippy -D warnings` (fast + pattern tiers)
+  - Rust tests (fast + pattern tiers)
+  - traced build, pattern-tier WASM build, typecheck
+  - JS tests (worker, node, sdk)
+  - Rust crate examples compile
+  - customer kit assembly (worker self-containment + WASM size budget)
+- CI gates (bindings job): native library build, C# `dotnet build`,
+  Go `go vet` + `go build`, Python binding smoke test.
 - Build trace artifacts must be uploaded on each CI run.
 
 ## 7) Runtime Safety Defaults
@@ -59,5 +66,10 @@ This document defines project-level standards for enterprise maintenance and rel
 - Confirm docs/schema updates for any config behavior changes.
 
 ## 10) Excel Strategy
-- Keep Excel route isolated from CSV fast path.
-- Excel parser dependencies must not impact default CSV runtime bundle.
+- Excel parsing lives in the Rust core (streaming worksheet scanner); rows
+  validate through the exact same path as CSV.
+- The WASM binary never carries a DEFLATE implementation — browsers inflate
+  with `DecompressionStream`, Node with `node:zlib`, native callers with the
+  built-in one-shot (`miniz_oxide`).
+- XLSX guardrail constants must stay identical in
+  `packages/core/src/xlsx/zip.ts` and `crates/validator/src/xlsx/zip.rs`.

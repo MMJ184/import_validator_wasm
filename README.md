@@ -1,69 +1,74 @@
-# import-validator-wasm
+# ImportValidator
 
-High-performance CSV validation engine with WASM core, worker runtime, and SDK.
+High-performance CSV **and Excel (.xlsx)** validation engine. One Rust core,
+six first-class integration surfaces: TypeScript (browser), Node.js, Python,
+C#, Go, and Rust — identical error codes, normalization, and schema contract
+everywhere.
 
-## Workspace Structure
-- `crates/validator`: Rust WASM validator engine.
-- `packages/core`: WASM loader + engine API + shared core helpers.
-- `packages/worker`: Worker pipeline (CSV fast path + separated `.xlsx` Excel route).
-- `packages/sdk`: Public client SDK for browser integrations.
-- `examples/vite-ts-demo`: Demo app.
-- `examples/csv-generator`: Sample CSV generation utility.
-- `docs`: Product/readiness/contract documentation.
+Measured on the reference schema (10 columns, unique keys, modifiers):
+**~1.1–1.3M CSV rows/s**, **~360k Excel rows/s**, estimates at **~4.4M
+rows/s**. Full numbers: [docs/BENCHMARKS.md](docs/BENCHMARKS.md); how they're
+achieved and tuned: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
-## Build Modes
-- Fast WASM build (default): minimal binary, maximum throughput.
-- Full WASM build (pattern validation enabled): larger binary.
+## Documentation
 
-Core scripts:
-- `pnpm --filter @import-validator/core run build:wasm:fast`
-- `pnpm --filter @import-validator/core run build:wasm:full`
+**Start at [docs/INDEX.md](docs/INDEX.md)** — the complete map. Shortcuts:
 
-## Common Commands
-- `pnpm run typecheck`: workspace type checks.
-- `pnpm run test`: worker + sdk automated tests.
-- `pnpm run build`: production build for core, worker, sdk, and demo.
-- `pnpm run dist:customer`: build and assemble customer distribution kit.
-- `pnpm run dist:customer:full`: rebuild + assemble customer distribution kit.
-- `pnpm run verify`: typecheck + build.
-- `pnpm run build:trace`: full build with detailed per-step logs and timing.
-- `pnpm run dev:ex`: run Vite demo.
+| I want to… | Read |
+|---|---|
+| Understand the architecture | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Find which file does what | [docs/CODE_MAP.md](docs/CODE_MAP.md) · interactive: [docs/code-map-3d.html](docs/code-map-3d.html) |
+| Integrate in the browser | [docs/guides/typescript-browser.md](docs/guides/typescript-browser.md) |
+| Integrate on a server | [Node](docs/guides/node.md) · [Python](docs/guides/python.md) · [C#](docs/guides/csharp.md) · [Go](docs/guides/go.md) · [Rust](docs/guides/rust.md) |
+| Write a validation schema | [docs/SCHEMA_REFERENCE.md](docs/SCHEMA_REFERENCE.md) |
+| Tune performance | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) |
+| Fix a build/runtime problem | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
+| See what changed | [docs/CHANGELOG.md](docs/CHANGELOG.md) |
 
-## Runtime Notes
-- Two-pass flow: `estimate=true` performs estimate first, then validate.
-- Preflight-only flow: `estimateOnly=true` runs estimate and skips full validation.
-- Structured fatal payloads include code/message/details/file context via SDK `onFatal`.
-- Excel path supports `.xlsx` in a separate worker pipeline; `.xls` is rejected.
+## Workspace structure
 
-## Build Trace Output
-`pnpm run build:trace` writes artifacts to:
-- `artifacts/build-traces/<timestamp>/summary.json`
-- `artifacts/build-traces/<timestamp>/summary.md`
-- `artifacts/build-traces/<timestamp>/<step>.log`
+```
+crates/validator      Rust engine (CSV + XLSX + counters) → WASM, C ABI, Rust API
+packages/core         WASM loading, Engine wrapper, ZIP reader, heuristics
+packages/worker       Browser Web Worker (protocol v2, pipelines, estimates)
+packages/sdk          createValidator() browser API
+packages/node         Node.js server package (CSV + XLSX)
+bindings/             C header + Python (ctypes) + C# (P/Invoke) + Go (cgo)
+examples/             vite-ts-demo · node_server · python_server · csharp_server · go_server · csv-generator
+docs/                 All documentation (see docs/INDEX.md)
+scripts/              bench · build-native · build-customer-kit · build-trace
+```
 
-This is used for enterprise debugging and build regression tracking.
+## Build & test
 
-## Client Documentation
-- Quick start guide: `docs/CLIENT_QUICKSTART.md`
-- Schema field reference: `docs/SCHEMA_REFERENCE.md`
-- SDK API reference: `docs/SDK_API.md`
-- Customer distribution guide: `docs/CUSTOMER_DISTRIBUTION.md`
-- Measured throughput: `docs/BENCHMARKS.md` (regenerate with `pnpm run bench`)
+```bash
+pnpm install
+pnpm run build            # WASM → core → worker → node → sdk → demo (order matters)
+pnpm run verify           # build + workspace typecheck (merge gate)
+pnpm run test             # worker + node + sdk test suites
+cd crates/validator && cargo test        # Rust engine tests (both: --features pattern)
 
-## Internal Docs
-- Current implementation flow: `docs/CURRENT_FLOW.md`
-- Modifier roadmap: `docs/MODIFIER_TASKS.md`
-- Product readiness: `docs/PRODUCT_READINESS.md`
-- Validation config schema: `docs/validation-config.schema.json`
-- Tenant profile examples: `docs/customer-profiles.json`
-- Engineering standards: `docs/ENGINEERING_STANDARDS.md`
+pnpm run dev:ex           # Vite demo (drag-drop CSV/XLSX validation)
+pnpm run bench            # rewrites docs/BENCHMARKS.md
+./scripts/build-native.sh # native library for Python/C#/Go
+pnpm run dist:customer    # customer distribution kit
+```
+
+Build modes: the default **fast** WASM tier omits the regex engine;
+`WASM_FEATURES=pattern` builds the **full** tier (enables `pattern` /
+`regexReplacePattern`). Optional SIMD build: `IV_WASM_SIMD=1` (see
+PERFORMANCE.md for the compatibility trade-off).
 
 ## CI
-GitHub Actions workflow:
-- `.github/workflows/ci.yml`
-- Sets up Node + pnpm + Rust + wasm-pack, runs Rust tests, full traced build,
-  typecheck, JS tests, and assembles the customer kit.
-- Uploads build traces and the customer kit zip as artifacts.
+
+`.github/workflows/ci.yml`: rustfmt + clippy (−D warnings, both tiers),
+Rust tests (both tiers), traced build, pattern-tier WASM, typecheck, JS
+tests, Rust examples, customer kit — plus a bindings job that builds the
+native library and compiles/smoke-tests the C#, Go, and Python bindings.
+`.github/workflows/release-native.yml`: tagged native binaries
+(Linux/macOS/Windows × fast/pattern) behind a test gate.
 
 ## License
-Proprietary — see `LICENSE`. Customer use requires a commercial license agreement.
+
+Proprietary — see `LICENSE`. Customer use requires a commercial license
+agreement.

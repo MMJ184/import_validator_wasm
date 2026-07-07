@@ -115,7 +115,8 @@ type ValidationMetrics = {
 
 ### `onNormalized(chunk: Uint8Array)`
 
-Fired with chunks of normalized CSV bytes. Only fires if `emitNormalized: true` was set. Reassemble with `new TextDecoder().decode(concatChunks(parts))`.
+Fired with chunks of normalized CSV bytes. Only fires if `emitNormalized: true` was set. Reassemble with `concatChunks` (exported from `@import-validator/sdk`):
+`new TextDecoder().decode(concatChunks(parts))`.
 
 ### `onDone()`
 

@@ -10,14 +10,29 @@ const outDir = path.join(rootDir, "artifacts", "customer-kit");
 const packageNames = ["core", "worker", "sdk", "node"];
 
 const docFiles = [
+    "INDEX.md",
     "CLIENT_QUICKSTART.md",
     "SCHEMA_REFERENCE.md",
     "SDK_API.md",
     "CUSTOMER_DISTRIBUTION.md",
     "NATIVE_CLIENTS.md",
+    "PERFORMANCE.md",
+    "BENCHMARKS.md",
+    "TROUBLESHOOTING.md",
+    "CHANGELOG.md",
+    "guides/typescript-browser.md",
+    "guides/node.md",
+    "guides/python.md",
+    "guides/csharp.md",
+    "guides/go.md",
+    "guides/rust.md",
     "validation-config.schema.json",
     "customer-profiles.json",
 ];
+
+// Fast-tier WASM size budget: warn loudly when the shipped binary crosses
+// this line so growth is a decision, not an accident.
+const WASM_SIZE_BUDGET_BYTES = 400 * 1024;
 
 async function assertBuildOutputs() {
     for (const name of packageNames) {
@@ -43,6 +58,20 @@ async function assertBuildOutputs() {
             "packages/worker/dist/worker.js still contains bare @import-validator imports. " +
             "Rebuild with: pnpm --filter @import-validator/worker run build"
         );
+    }
+
+    const wasmPath = path.join(
+        rootDir, "packages", "core", "dist", "wasm", "pkg", "import_validator_wasm_bg.wasm"
+    );
+    const wasmSize = (await stat(wasmPath)).size;
+    if (wasmSize > WASM_SIZE_BUDGET_BYTES) {
+        console.warn(
+            `[kit] WARNING: fast-tier WASM is ${(wasmSize / 1024).toFixed(0)} KB ` +
+            `(budget ${(WASM_SIZE_BUDGET_BYTES / 1024).toFixed(0)} KB). ` +
+            `Investigate before shipping (see docs/PERFORMANCE.md).`
+        );
+    } else {
+        console.log(`[kit] fast-tier WASM size OK: ${(wasmSize / 1024).toFixed(0)} KB`);
     }
 }
 
@@ -97,7 +126,9 @@ async function createKit() {
 
     // 3. Docs + license.
     for (const doc of docFiles) {
-        await cp(path.join(rootDir, "docs", doc), path.join(outDir, "docs", doc));
+        const dest = path.join(outDir, "docs", doc);
+        await mkdir(path.dirname(dest), { recursive: true });
+        await cp(path.join(rootDir, "docs", doc), dest);
     }
     await cp(path.join(rootDir, "LICENSE"), path.join(outDir, "LICENSE"));
 

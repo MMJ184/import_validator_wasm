@@ -1,0 +1,12 @@
+{
+  "name": "node-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "busboy": "^1.6.0",
+    "express": "^4.19.2"
+  }
+}

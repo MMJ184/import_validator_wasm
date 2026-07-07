@@ -1,38 +1,74 @@
 {
-  "version": 1,
-  "tenants": [
-    {
-      "tenantId": "finance-default",
-      "runtime": {
-        "profile": "strict",
-        "estimate": true,
-        "maxFileBytes": 104857600,
-        "maxRowsEstimate": 1000000,
-        "maxColumns": 200,
-        "timeoutMs": 120000
-      }
-    },
-    {
-      "tenantId": "ops-default",
-      "runtime": {
-        "profile": "balanced",
-        "estimate": true,
-        "maxFileBytes": 209715200,
-        "maxRowsEstimate": 2000000,
-        "maxColumns": 400,
-        "timeoutMs": 180000
-      }
-    },
-    {
-      "tenantId": "fast-self-serve",
-      "runtime": {
-        "profile": "fast",
-        "estimate": false,
-        "maxFileBytes": 52428800,
-        "maxRowsEstimate": 500000,
-        "maxColumns": 100,
-        "timeoutMs": 60000
-      }
-    }
-  ]
+    "$comment": "Example per-tenant configurations. Each tenant's `config` object conforms to validation-config.schema.json ({schemaVersion, schema, runtime}). These are RUNTIME tuning presets — not the Phase 4 modifier packs from MODIFIER_TASKS.md.",
+    "version": 2,
+    "tenants": [
+        {
+            "tenantId": "finance-default",
+            "description": "Financial imports: strict precision, strong guardrails, estimates on.",
+            "config": {
+                "schemaVersion": 1,
+                "schema": {
+                    "hasHeaders": true,
+                    "columns": [
+                        { "name": "accountId", "type": "int", "required": true, "unique": true },
+                        { "name": "amount", "type": "decimal", "precision": 2, "strictPrecision": true, "required": true },
+                        { "name": "bookedAt", "type": "date", "dateFormat": "ymd-dash", "required": true }
+                    ]
+                },
+                "runtime": {
+                    "profile": "strict",
+                    "estimate": true,
+                    "maxFileBytes": 209715200,
+                    "maxRowsEstimate": 2000000,
+                    "maxColumns": 64,
+                    "timeoutMs": 180000
+                }
+            }
+        },
+        {
+            "tenantId": "ops-default",
+            "description": "Operational imports: balanced defaults, medium limits.",
+            "config": {
+                "schemaVersion": 1,
+                "schema": {
+                    "hasHeaders": true,
+                    "columns": [
+                        { "name": "sku", "type": "string", "required": true, "unique": true, "maxLen": 64 },
+                        { "name": "quantity", "type": "int", "required": true },
+                        { "name": "warehouse", "type": "string", "required": true, "allowed": ["EU-1", "US-1", "IN-1"] }
+                    ]
+                },
+                "runtime": {
+                    "profile": "balanced",
+                    "maxFileBytes": 524288000,
+                    "maxRowsEstimate": 5000000,
+                    "maxColumns": 128,
+                    "timeoutMs": 300000
+                }
+            }
+        },
+        {
+            "tenantId": "fast-self-serve",
+            "description": "Self-serve uploads: fastest path, tight limits, no estimate pass.",
+            "config": {
+                "schemaVersion": 1,
+                "schema": {
+                    "hasHeaders": true,
+                    "caseInsensitiveHeaders": true,
+                    "columns": [
+                        { "name": "email", "type": "email", "required": true, "unique": true, "modifiers": { "trim": true, "lowercase": true } },
+                        { "name": "fullName", "type": "string", "required": true, "modifiers": { "trim": true, "collapseWhitespace": true, "titleCase": true } }
+                    ]
+                },
+                "runtime": {
+                    "profile": "fast",
+                    "estimate": false,
+                    "maxFileBytes": 52428800,
+                    "maxRowsEstimate": 500000,
+                    "maxColumns": 32,
+                    "timeoutMs": 60000
+                }
+            }
+        }
+    ]
 }

@@ -57,14 +57,8 @@ npm install ./packages/import-validator-core-<version>.tgz \
 
 3. Structured fatal errors are returned:
 - Callback signature: `onFatal(message, fatal)`
-- `fatal.code` values include:
-  - `FILE_TOO_LARGE`
-  - `ROWS_LIMIT_EXCEEDED`
-  - `COLUMNS_LIMIT_EXCEEDED`
-  - `TIMEOUT`
-  - `WASM_RUNTIME`
-  - `EXCEL_ROUTE_DISABLED`
-  - `VALIDATION_FAILED`
+- The canonical `fatal.code` table (all 11 codes, with phases and retryability)
+  lives in `SDK_API.md` — this document intentionally does not copy it.
 
 4. Runtime config contract is defined in:
 - `validation-config.schema.json`

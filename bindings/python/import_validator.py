@@ -1,3 +1,4 @@
+# Copyright (c) 2025-2026 Maulik Mangukiya. All rights reserved. See LICENSE.
 """
 import_validator — Python bindings for the ImportValidator native library.
 
@@ -6,11 +7,11 @@ Requires the native cdylib built with:
 
 Set the library path either explicitly:
     import import_validator as iv
-    iv.load_library("/path/to/libimport_validator_wasm.dylib")
+    iv.load_library("/path/to/libimport_validator.dylib")
 
 or via the environment variable IMPORT_VALIDATOR_LIB before importing.
 
-Quick example:
+Quick example (CSV):
     import json, import_validator as iv
 
     schema = json.dumps({
@@ -32,16 +33,24 @@ Quick example:
             engine.push_chunk(chunk)
 
     for err in engine.take_errors():
-        print(err)
+        print(err.message)
+
+Quick example (XLSX, one-shot):
+    result = iv.validate_xlsx_file("data.xlsx", schema)
+    for err in result.errors:
+        print(err.message)
 """
 
 import ctypes
 import json
 import os
 import platform
-import sys
 from dataclasses import dataclass
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Tuple
+
+__version__ = "0.2.0"
+
+_ERR_BUF_LEN = 1024
 
 # ── Library loading ──────────────────────────────────────────────────────────
 
@@ -51,11 +60,11 @@ _lib: Optional[ctypes.CDLL] = None
 def _default_lib_name() -> str:
     system = platform.system()
     if system == "Darwin":
-        return "libimport_validator_wasm.dylib"
+        return "libimport_validator.dylib"
     if system == "Linux":
-        return "libimport_validator_wasm.so"
+        return "libimport_validator.so"
     if system == "Windows":
-        return "import_validator_wasm.dll"
+        return "import_validator.dll"
     raise RuntimeError(f"Unsupported platform: {system}")
 
 
@@ -102,6 +111,10 @@ def _configure_signatures(lib: ctypes.CDLL) -> None:
     lib.iv_engine_destroy.argtypes = [ctypes.c_void_p]
     lib.iv_engine_destroy.restype = None
 
+    # Static storage — decoded via c_char_p, never freed.
+    lib.iv_version.argtypes = []
+    lib.iv_version.restype = ctypes.c_char_p
+
     lib.iv_engine_push_chunk.argtypes = [
         ctypes.c_void_p,   # handle
         ctypes.c_char_p,   # chunk_ptr
@@ -110,6 +123,37 @@ def _configure_signatures(lib: ctypes.CDLL) -> None:
         ctypes.c_void_p,   # out_progress (pointer to IvProgress struct)
     ]
     lib.iv_engine_push_chunk.restype = ctypes.c_int32
+
+    lib.iv_engine_validate_xlsx_bytes.argtypes = [
+        ctypes.c_void_p,   # handle
+        ctypes.c_char_p,   # bytes_ptr
+        ctypes.c_uint32,   # bytes_len
+        ctypes.c_void_p,   # out_progress
+        ctypes.c_char_p,   # err_buf
+        ctypes.c_uint32,   # err_buf_len
+    ]
+    lib.iv_engine_validate_xlsx_bytes.restype = ctypes.c_int32
+
+    lib.iv_engine_push_shared_strings_chunk.argtypes = [
+        ctypes.c_void_p,   # handle
+        ctypes.c_char_p,   # chunk_ptr
+        ctypes.c_uint32,   # chunk_len
+        ctypes.c_uint8,    # final_chunk
+        ctypes.c_char_p,   # err_buf
+        ctypes.c_uint32,   # err_buf_len
+    ]
+    lib.iv_engine_push_shared_strings_chunk.restype = ctypes.c_int32
+
+    lib.iv_engine_push_sheet_chunk.argtypes = [
+        ctypes.c_void_p,   # handle
+        ctypes.c_char_p,   # chunk_ptr
+        ctypes.c_uint32,   # chunk_len
+        ctypes.c_uint8,    # final_chunk
+        ctypes.c_void_p,   # out_progress
+        ctypes.c_char_p,   # err_buf
+        ctypes.c_uint32,   # err_buf_len
+    ]
+    lib.iv_engine_push_sheet_chunk.restype = ctypes.c_int32
 
     lib.iv_engine_errors_count.argtypes = [ctypes.c_void_p]
     lib.iv_engine_errors_count.restype = ctypes.c_uint32
@@ -126,6 +170,9 @@ def _configure_signatures(lib: ctypes.CDLL) -> None:
 
     lib.iv_engine_input_columns_json.argtypes = [ctypes.c_void_p]
     lib.iv_engine_input_columns_json.restype = ctypes.c_void_p
+
+    lib.iv_engine_rows_processed.argtypes = [ctypes.c_void_p]
+    lib.iv_engine_rows_processed.restype = ctypes.c_uint32
 
     lib.iv_engine_take_normalized.argtypes = [
         ctypes.c_void_p,                   # handle
@@ -166,11 +213,13 @@ class ChunkProgress:
 @dataclass
 class ValidationError:
     """A single validation error decoded from the packed u32 pair."""
-    row: int        # 1-based data row number
+    row: int        # 1-based data row number (0 = header row)
     col: int        # 0-based column index
     kind: str       # "schema" or "input" (which column index space col refers to)
     code: int       # numeric error code
     code_name: str  # e.g. "InvalidType"
+    column_name: Optional[str] = None  # resolved column name (None if out of range)
+    message: str = ""                  # human-readable message
 
     def __str__(self) -> str:
         return f"row={self.row} col={self.col} [{self.kind}] {self.code_name} ({self.code})"
@@ -180,7 +229,11 @@ class ValidationError:
 
 class Engine:
     """
-    Streaming CSV validation engine wrapping the native library.
+    Streaming CSV/XLSX validation engine wrapping the native library.
+
+    An engine validates exactly ONE stream — either CSV bytes via push_chunk,
+    or XLSX via push_shared_strings_chunk/push_sheet_chunk (or the one-shot
+    validate_xlsx_bytes). Create a new engine per file.
 
     Usage:
         engine = Engine(schema_json, max_errors=1000, emit_normalized=False)
@@ -199,13 +252,13 @@ class Engine:
         emit_normalized: bool = False,
     ) -> None:
         lib = _get_lib()
-        err_buf = ctypes.create_string_buffer(512)
+        err_buf = ctypes.create_string_buffer(_ERR_BUF_LEN)
         handle = lib.iv_engine_new(
             schema_json.encode("utf-8"),
             ctypes.c_uint32(max_errors),
             ctypes.c_uint8(1 if emit_normalized else 0),
             err_buf,
-            ctypes.c_uint32(512),
+            ctypes.c_uint32(_ERR_BUF_LEN),
         )
         if not handle:
             msg = err_buf.value.decode("utf-8", errors="replace")
@@ -231,7 +284,7 @@ class Engine:
     def __del__(self) -> None:
         self.close()
 
-    # ── Processing ───────────────────────────────────────────────────────────
+    # ── Processing: CSV ──────────────────────────────────────────────────────
 
     def push_chunk(self, chunk: bytes, *, final: bool = False) -> ChunkProgress:
         """
@@ -250,7 +303,85 @@ class Engine:
             ctypes.byref(prog),
         )
         if ret != 0:
-            raise RuntimeError("push_chunk returned error (NULL handle)")
+            raise RuntimeError("push_chunk returned error (NULL handle or input-mode misuse)")
+        return ChunkProgress(
+            rows_processed=prog.rows_processed,
+            errors_added=prog.errors_added,
+            done=bool(prog.done),
+        )
+
+    # ── Processing: XLSX ─────────────────────────────────────────────────────
+
+    def push_shared_strings_chunk(self, chunk: bytes, *, final: bool = False) -> None:
+        """
+        Feed a chunk of decompressed xl/sharedStrings.xml to the engine.
+
+        Must complete (final=True) BEFORE the first push_sheet_chunk call.
+        Raises ValueError with the native error message on failure.
+        """
+        self._check_open()
+        err_buf = ctypes.create_string_buffer(_ERR_BUF_LEN)
+        ret = self._lib.iv_engine_push_shared_strings_chunk(
+            self._handle,
+            chunk or b"",
+            ctypes.c_uint32(len(chunk)),
+            ctypes.c_uint8(1 if final else 0),
+            err_buf,
+            ctypes.c_uint32(_ERR_BUF_LEN),
+        )
+        if ret != 0:
+            raise ValueError(
+                f"push_shared_strings_chunk failed: {_err_buf_message(err_buf, ret)}"
+            )
+
+    def push_sheet_chunk(self, chunk: bytes, *, final: bool = False) -> ChunkProgress:
+        """
+        Feed a chunk of decompressed worksheet XML (xl/worksheets/sheetN.xml).
+
+        Rows validate exactly like CSV rows. Set final=True on the last call.
+        Raises ValueError with the native error message on failure.
+        """
+        self._check_open()
+        prog = _IvProgress()
+        err_buf = ctypes.create_string_buffer(_ERR_BUF_LEN)
+        ret = self._lib.iv_engine_push_sheet_chunk(
+            self._handle,
+            chunk or b"",
+            ctypes.c_uint32(len(chunk)),
+            ctypes.c_uint8(1 if final else 0),
+            ctypes.byref(prog),
+            err_buf,
+            ctypes.c_uint32(_ERR_BUF_LEN),
+        )
+        if ret != 0:
+            raise ValueError(f"push_sheet_chunk failed: {_err_buf_message(err_buf, ret)}")
+        return ChunkProgress(
+            rows_processed=prog.rows_processed,
+            errors_added=prog.errors_added,
+            done=bool(prog.done),
+        )
+
+    def validate_xlsx_bytes(self, xlsx_bytes: bytes) -> ChunkProgress:
+        """
+        One-shot: validate a complete .xlsx workbook from a byte buffer.
+
+        The engine parses the ZIP container, streams shared strings, then
+        streams the first worksheet. Raises ValueError with the native error
+        message on failure.
+        """
+        self._check_open()
+        prog = _IvProgress()
+        err_buf = ctypes.create_string_buffer(_ERR_BUF_LEN)
+        ret = self._lib.iv_engine_validate_xlsx_bytes(
+            self._handle,
+            xlsx_bytes,
+            ctypes.c_uint32(len(xlsx_bytes)),
+            ctypes.byref(prog),
+            err_buf,
+            ctypes.c_uint32(_ERR_BUF_LEN),
+        )
+        if ret != 0:
+            raise ValueError(f"validate_xlsx_bytes failed: {_err_buf_message(err_buf, ret)}")
         return ChunkProgress(
             rows_processed=prog.rows_processed,
             errors_added=prog.errors_added,
@@ -275,13 +406,22 @@ class Engine:
             buf,
             ctypes.c_uint32(max_errors),
         )
-        return [_decode_error(buf[i * 2], buf[i * 2 + 1]) for i in range(pairs)]
+        if pairs == 0:
+            return []
+        # Resolve column names once per drain call, not per error.
+        schema_cols = self.schema_columns()
+        input_cols = self.input_columns()
+        return [
+            _decode_error(buf[i * 2], buf[i * 2 + 1], schema_cols, input_cols)
+            for i in range(pairs)
+        ]
 
     def iter_errors(self, batch_size: int = 5_000) -> Iterator[ValidationError]:
         """Lazily drain errors in batches."""
         self._check_open()
         buf_size = batch_size * 2
         buf = (ctypes.c_uint32 * buf_size)()
+        cols: Optional[Tuple[List[str], List[str]]] = None
         while True:
             pairs = self._lib.iv_engine_take_errors_packed(
                 self._handle,
@@ -290,8 +430,11 @@ class Engine:
             )
             if pairs == 0:
                 break
+            if cols is None:
+                # Resolve column names once per drain call, not per error.
+                cols = (self.schema_columns(), self.input_columns())
             for i in range(pairs):
-                yield _decode_error(buf[i * 2], buf[i * 2 + 1])
+                yield _decode_error(buf[i * 2], buf[i * 2 + 1], cols[0], cols[1])
 
     # ── Metadata ─────────────────────────────────────────────────────────────
 
@@ -302,10 +445,16 @@ class Engine:
         return _take_json_list(self._lib, ptr)
 
     def input_columns(self) -> List[str]:
-        """Input CSV header column names in input order."""
+        """Input (CSV/XLSX header) column names in input order."""
         self._check_open()
         ptr = self._lib.iv_engine_input_columns_json(self._handle)
         return _take_json_list(self._lib, ptr)
+
+    @property
+    def rows_processed(self) -> int:
+        """Total data rows processed so far (header excluded)."""
+        self._check_open()
+        return int(self._lib.iv_engine_rows_processed(self._handle))
 
     # ── Normalized output ────────────────────────────────────────────────────
 
@@ -330,6 +479,13 @@ class Engine:
 
 # ── Convenience functions ────────────────────────────────────────────────────
 
+def engine_version() -> str:
+    """Native engine version string (from iv_version)."""
+    lib = _get_lib()
+    raw = lib.iv_version()
+    return raw.decode("utf-8", errors="replace") if raw else ""
+
+
 def validate_bytes(
     csv_bytes: bytes,
     schema_json: str,
@@ -348,16 +504,7 @@ def validate_bytes(
             offset = end
         if not csv_bytes:
             engine.push_chunk(b"", final=True)
-        schema_cols = engine.schema_columns()
-        input_cols = engine.input_columns()
-        errors = engine.take_errors(max_errors)
-        normalized = engine.take_normalized() if emit_normalized else b""
-    return ValidationResult(
-        errors=errors,
-        schema_columns=schema_cols,
-        input_columns=input_cols,
-        normalized=normalized,
-    )
+        return _collect_result(engine, max_errors, emit_normalized)
 
 
 def validate_file(
@@ -377,15 +524,34 @@ def validate_file(
                     engine.push_chunk(b"", final=True)
                     break
                 engine.push_chunk(chunk)
-        schema_cols = engine.schema_columns()
-        input_cols = engine.input_columns()
-        errors = engine.take_errors(max_errors)
-        normalized = engine.take_normalized() if emit_normalized else b""
-    return ValidationResult(
-        errors=errors,
-        schema_columns=schema_cols,
-        input_columns=input_cols,
-        normalized=normalized,
+        return _collect_result(engine, max_errors, emit_normalized)
+
+
+def validate_xlsx_bytes(
+    xlsx_bytes: bytes,
+    schema_json: str,
+    *,
+    max_errors: int = 10_000,
+    emit_normalized: bool = False,
+) -> "ValidationResult":
+    """Validate a complete .xlsx workbook held in memory against schema_json."""
+    with Engine(schema_json, max_errors=max_errors, emit_normalized=emit_normalized) as engine:
+        engine.validate_xlsx_bytes(xlsx_bytes)
+        return _collect_result(engine, max_errors, emit_normalized)
+
+
+def validate_xlsx_file(
+    path: str,
+    schema_json: str,
+    *,
+    max_errors: int = 10_000,
+    emit_normalized: bool = False,
+) -> "ValidationResult":
+    """Validate an .xlsx file at path against schema_json."""
+    with open(path, "rb") as f:
+        data = f.read()
+    return validate_xlsx_bytes(
+        data, schema_json, max_errors=max_errors, emit_normalized=emit_normalized
     )
 
 
@@ -401,17 +567,89 @@ class ValidationResult:
         return len(self.errors) == 0
 
 
+def _collect_result(engine: Engine, max_errors: int, emit_normalized: bool) -> ValidationResult:
+    schema_cols = engine.schema_columns()
+    input_cols = engine.input_columns()
+    errors = engine.take_errors(max_errors)
+    normalized = engine.take_normalized() if emit_normalized else b""
+    return ValidationResult(
+        errors=errors,
+        schema_columns=schema_cols,
+        input_columns=input_cols,
+        normalized=normalized,
+    )
+
+
 # ── Internal decode helpers ───────────────────────────────────────────────────
 
-def _decode_error(word0: int, word1: int) -> ValidationError:
-    # word0 = row (1-based)
+def _decode_error(
+    word0: int,
+    word1: int,
+    schema_cols: List[str],
+    input_cols: List[str],
+) -> ValidationError:
+    # word0 = row (1-based; 0 = header)
     # word1 = (kind:1)(col:23)(code:8)
     row = word0
     code = word1 & 0xFF
     col = (word1 >> 8) & 0x7FFFFF
     kind = "input" if (word1 >> 31) & 1 else "schema"
     code_name = error_code_name(code)
-    return ValidationError(row=row, col=col, kind=kind, code=code, code_name=code_name)
+    cols = input_cols if kind == "input" else schema_cols
+    column_name = cols[col] if col < len(cols) else None
+    return ValidationError(
+        row=row,
+        col=col,
+        kind=kind,
+        code=code,
+        code_name=code_name,
+        column_name=column_name,
+        message=_format_message(row, code_name, column_name),
+    )
+
+
+def _format_message(row: int, code_name: str, column_name: Optional[str]) -> str:
+    where = "Header" if row == 0 else f"Row {row}"
+    col_part = f', column "{column_name}"' if column_name else ""
+
+    if code_name == "MissingRequiredColumn":
+        return f"{where}{col_part}: missing required column"
+    if code_name == "ExtraColumn":
+        return f"{where}{col_part}: extra column not allowed"
+    if code_name == "ColumnCountMismatch":
+        return f"{where}: column count does not match configured totalColumns"
+    if code_name == "MissingRequired":
+        return f"{where}{col_part}: value is required"
+    if code_name == "InvalidType":
+        return f"{where}{col_part}: invalid type"
+    if code_name == "MaxLengthExceeded":
+        return f"{where}{col_part}: exceeds max length"
+    if code_name == "MinLengthNotMet":
+        return f"{where}{col_part}: below minimum length"
+    if code_name == "NotAllowed":
+        return f"{where}{col_part}: value not allowed"
+    if code_name == "InvalidEmail":
+        return f"{where}{col_part}: invalid email format"
+    if code_name == "PatternMismatch":
+        return f"{where}{col_part}: does not match required pattern"
+    if code_name == "PrecisionExceeded":
+        return f"{where}{col_part}: decimal precision exceeded"
+    if code_name == "InvalidUtf8":
+        return f"{where}{col_part}: invalid text encoding"
+    if code_name == "DuplicateValue":
+        return f"{where}{col_part}: duplicate value not allowed"
+    if code_name == "DuplicateCombination":
+        return f"{where}{col_part}: duplicate combination not allowed"
+    return f"{where}{col_part}: validation error"
+
+
+def _err_buf_message(err_buf: "ctypes.Array", ret: int) -> str:
+    msg = err_buf.value.decode("utf-8", errors="replace")
+    if msg:
+        return msg
+    if ret == -1:
+        return "null engine handle or missing input"
+    return f"native call failed (code {ret})"
 
 
 def _take_json_list(lib: ctypes.CDLL, ptr: int) -> List[str]:

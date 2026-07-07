@@ -1,0 +1,18 @@
+<!-- Copyright (c) 2025-2026 Maulik Mangukiya. All rights reserved. See LICENSE. -->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>ImportValidator</RootNamespace>
+    <AssemblyName>ImportValidator</AssemblyName>
+    <Version>0.2.0</Version>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Authors>Maulik Mangukiya</Authors>
+    <Description>C# bindings for the ImportValidator native CSV/XLSX validation engine.</Description>
+    <Copyright>Copyright (c) 2025-2026 Maulik Mangukiya. All rights reserved.</Copyright>
+  </PropertyGroup>
+
+</Project>

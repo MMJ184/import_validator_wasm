@@ -138,6 +138,16 @@ Error code emitted: `DuplicateCombination` on the first listed column.
 
 ---
 
+## Excel (.xlsx) Semantics
+
+The same schema validates CSV and Excel. For workbooks: the FIRST worksheet
+is validated; row 1 is the header row when `hasHeaders` is true; sparse cell
+gaps become empty values; boolean cells become `TRUE`/`FALSE`; shared and
+inline strings are resolved; XML entities are decoded. Omitted (fully empty)
+rows are skipped, so error row numbers count data rows, not Excel row
+numbers. Number formats are NOT applied — a `date` column needs dates stored
+as ISO text, not Excel date serials.
+
 ## Error Codes
 
 | Code | Value | Triggered When |

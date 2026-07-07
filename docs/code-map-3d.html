@@ -1,0 +1,800 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ImportValidator — 3D Code Map</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --bg-panel: rgba(21, 26, 34, 0.88);
+    --bg-panel-solid: #151a22;
+    --fg: #e8ecf3;
+    --fg-dim: #97a1b3;
+    --line: #2a3140;
+    --accent: #e8734a;
+    --chip-off: #1c222d;
+    --shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  }
+  :root[data-theme="light"] {
+    --bg: #f2f4f7;
+    --bg-panel: rgba(255, 255, 255, 0.92);
+    --bg-panel-solid: #ffffff;
+    --fg: #1a2230;
+    --fg-dim: #5b6575;
+    --line: #d7dce4;
+    --chip-off: #e6e9ef;
+    --shadow: 0 8px 28px rgba(30, 40, 60, 0.16);
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f2f4f7;
+      --bg-panel: rgba(255, 255, 255, 0.92);
+      --bg-panel-solid: #ffffff;
+      --fg: #1a2230;
+      --fg-dim: #5b6575;
+      --line: #d7dce4;
+      --chip-off: #e6e9ef;
+      --shadow: 0 8px 28px rgba(30, 40, 60, 0.16);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    overflow: hidden;
+  }
+  #scene { position: fixed; inset: 0; display: block; cursor: grab; }
+  #scene.dragging { cursor: grabbing; }
+
+  .panel {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    width: min(320px, calc(100vw - 32px));
+    background: var(--bg-panel);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    padding: 14px 14px 12px;
+    z-index: 10;
+  }
+  .panel h1 {
+    margin: 0 0 2px;
+    font-size: 15px;
+    font-weight: 650;
+    letter-spacing: 0.01em;
+  }
+  .panel .sub {
+    margin: 0 0 10px;
+    color: var(--fg-dim);
+    font-size: 12px;
+  }
+  #search {
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    outline: none;
+  }
+  #search:focus { border-color: var(--accent); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 9px 4px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--chip-off);
+    color: var(--fg-dim);
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    user-select: none;
+  }
+  .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+  .chip.on { color: var(--fg); border-color: color-mix(in srgb, var(--c) 55%, var(--line)); background: color-mix(in srgb, var(--c) 16%, var(--chip-off)); }
+  .chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  .hint {
+    position: fixed;
+    left: 16px;
+    bottom: 14px;
+    color: var(--fg-dim);
+    font-size: 11.5px;
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 6px 10px;
+    z-index: 10;
+  }
+  .hint b { color: var(--fg); font-weight: 600; }
+
+  #card {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    width: min(340px, calc(100vw - 32px));
+    max-height: calc(100vh - 32px);
+    overflow: auto;
+    background: var(--bg-panel);
+    backdrop-filter: blur(10px);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    padding: 14px;
+    z-index: 10;
+    display: none;
+  }
+  #card.show { display: block; }
+  #card .path {
+    font: 600 13px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    word-break: break-all;
+  }
+  #card .area-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 8px 0 8px;
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+  }
+  #card .area-tag .dot { width: 8px; height: 8px; border-radius: 50%; }
+  #card .desc { margin: 0 0 12px; color: var(--fg); font-size: 13px; }
+  #card .links-h {
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+    margin: 0 0 6px;
+  }
+  #card .links { display: flex; flex-direction: column; gap: 3px; margin: 0; padding: 0; list-style: none; }
+  #card .links button {
+    all: unset;
+    display: block;
+    width: 100%;
+    padding: 4px 7px;
+    border-radius: 6px;
+    font: 12px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color: var(--fg);
+    cursor: pointer;
+  }
+  #card .links button:hover, #card .links button:focus-visible { background: var(--chip-off); outline: none; }
+  #card .close {
+    all: unset;
+    float: right;
+    cursor: pointer;
+    color: var(--fg-dim);
+    font-size: 16px;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 6px;
+  }
+  #card .close:hover, #card .close:focus-visible { color: var(--fg); background: var(--chip-off); }
+
+  @media (max-width: 720px) {
+    #card { top: auto; bottom: 14px; right: 16px; max-height: 45vh; }
+    .hint { display: none; }
+  }
+</style>
+
+<canvas id="scene" aria-label="3D dependency graph of the ImportValidator repository"></canvas>
+
+<div class="panel">
+  <h1>ImportValidator · 3D Code Map</h1>
+  <p class="sub">Every file, its purpose, and its real import/reference edges.</p>
+  <input id="search" type="search" placeholder="Search files… (Enter jumps to best match)" aria-label="Search files">
+  <div class="chips" id="chips" role="group" aria-label="Toggle areas"></div>
+</div>
+
+<div class="hint"><b>drag</b> rotate · <b>scroll</b> zoom · <b>click</b> node focus · <b>esc</b> clear</div>
+
+<aside id="card" aria-live="polite">
+  <button class="close" id="cardClose" aria-label="Close details">×</button>
+  <div class="path" id="cardPath"></div>
+  <div class="area-tag"><span class="dot" id="cardDot"></span><span id="cardArea"></span></div>
+  <p class="desc" id="cardDesc"></p>
+  <div class="links-h" id="cardLinksH">Connections</div>
+  <ul class="links" id="cardLinks"></ul>
+</aside>
+
+<script>
+"use strict";
+
+// ── Areas ────────────────────────────────────────────────────────────────────
+const AREAS = {
+  rust:     { label: "Rust core",  color: "#e8734a" },
+  core:     { label: "core (TS)",  color: "#4a9de8" },
+  worker:   { label: "worker",     color: "#8f7ae8" },
+  sdk:      { label: "sdk",        color: "#3fbf8f" },
+  node:     { label: "node",       color: "#d9b23c" },
+  bindings: { label: "bindings",   color: "#e05f87" },
+  examples: { label: "examples",   color: "#58c7d0" },
+  docs:     { label: "docs",       color: "#93a0b4" },
+  build:    { label: "build/CI",   color: "#b08c66" },
+};
+
+// ── Graph data: real files, real edges ───────────────────────────────────────
+// N(id, area, description). Edge list uses ids. Hand-derived from the actual
+// import graph (see docs/CODE_MAP.md).
+const NODES_RAW = [
+  // Rust core
+  ["crates/validator/src/lib.rs", "rust", "Module wiring, public re-exports, crate docs."],
+  ["crates/validator/src/engine.rs", "rust", "The validation core: CSV record loop, header mapping, field validation, uniqueness, normalized output, error queue."],
+  ["crates/validator/src/schema.rs", "rust", "Schema JSON contract types (serde): columns, modifiers, types, unique groups."],
+  ["crates/validator/src/errors.rs", "rust", "Stable error codes 1–14 and the packed 2×u32 error representation."],
+  ["crates/validator/src/typecheck.rs", "rust", "Type validators + canonicalizers with zero-alloc fast paths (decimal, date, email, int, float)."],
+  ["crates/validator/src/modifiers.rs", "rust", "Pre-validation value transforms: trim, case, substring, replace, null tokens, numeric rounding, prefix/suffix."],
+  ["crates/validator/src/fingerprint.rs", "rust", "xxh3-128 content fingerprints + identity hasher for uniqueness sets (~24 B per distinct value)."],
+  ["crates/validator/src/counter.rs", "rust", "Quote-aware streaming CSV row counter powering the ~4M rows/s estimate pass."],
+  ["crates/validator/src/xlsx/xml.rs", "rust", "Streaming-XML primitives: tags, attributes, entities (chunk-split safe), cell refs."],
+  ["crates/validator/src/xlsx/scanner.rs", "rust", "Worksheet-XML state machine: feeds rows straight into the core; also the sheet row counter."],
+  ["crates/validator/src/xlsx/shared.rs", "rust", "Streaming sharedStrings.xml builder with concatenated storage."],
+  ["crates/validator/src/xlsx/zip.rs", "rust", "Native-only ZIP + miniz_oxide inflate; one-shot validate_xlsx_bytes with guardrails."],
+  ["crates/validator/src/api.rs", "rust", "Public Rust API: Validator, typed ValidationError with resolved column names."],
+  ["crates/validator/src/wasm_api.rs", "rust", "wasm-bindgen adapter: ValidatorEngine, RowCounter, XlsxRowCounter (JS-name contract)."],
+  ["crates/validator/src/ffi.rs", "rust", "C ABI (iv_*): lifecycle, CSV/XLSX pushes, one-shot XLSX, error draining, memory management."],
+  ["crates/validator/tests/xlsx_integration.rs", "rust", "End-to-end XLSX tests at every chunk size + hand-rolled ZIP fixtures."],
+  ["crates/validator/examples/validate_csv.rs", "rust", "Runnable Rust example: stream-validate a CSV file."],
+  ["crates/validator/examples/validate_xlsx.rs", "rust", "Runnable Rust example: one-shot validate an .xlsx workbook."],
+  ["crates/validator/Cargo.toml", "build", "Crate manifest: target-gated deps, features (pattern/dev), release profile."],
+
+  // core TS
+  ["packages/core/src/engine.ts", "core", "Engine wrapper over wasm-bindgen + decodePackedErrors (single source of JS error wording) + row counters."],
+  ["packages/core/src/wasm/index.ts", "core", "WASM instantiation with cache-bust retry and Node file loading."],
+  ["packages/core/src/xlsx/zip.ts", "core", "Environment-agnostic ZIP reader: directory parse, size-enforcing entry streams, XLSX_LIMITS."],
+  ["packages/core/src/validate/validateCsv.ts", "core", "Full-run CSV helper used by the Node package."],
+  ["packages/core/src/validate/chooseChunkSize.ts", "core", "Chunk-size heuristics from file size × device memory."],
+  ["packages/core/src/validate/sources.ts", "core", "ChunkSource → AsyncIterable adapters (bytes, blob, stream)."],
+  ["packages/core/src/types.ts", "core", "Progress, PackedError, DecodedError, ErrorCodeString."],
+  ["packages/core/src/index.ts", "core", "Public exports + concatChunks."],
+  ["packages/core/scripts/build-wasm.mjs", "build", "wasm-pack build; WASM_FEATURES=pattern tier; IV_WASM_SIMD opt-in."],
+
+  // worker
+  ["packages/worker/src/worker.ts", "worker", "Worker message loop: init/validate/estimate orchestration, cancel, engine cache, metrics."],
+  ["packages/worker/src/protocol.ts", "worker", "Protocol v2: requests, responses (errorsPacked, normalized transfer), fatal codes."],
+  ["packages/worker/src/pipeline/csvPipeline.ts", "worker", "Shared runEngineStream drain loop + read-ahead file streaming + macrotask yield."],
+  ["packages/worker/src/pipeline/xlsxPipeline.ts", "worker", "ZIP-once XLSX pipeline: dimension fast-path estimate, DecompressionStream → Rust scanner."],
+  ["packages/worker/src/pipeline/estimateCsv.ts", "worker", "CSV estimate via WASM RowCounter with JS fallback."],
+  ["packages/worker/src/errorTaxonomy.ts", "worker", "Error → stable fatal-code mapping with friendly messages."],
+  ["packages/worker/src/flow.ts", "worker", "schemaVersion gate + estimate-pass flag derivation."],
+  ["packages/worker/src/loaders/wasmLoader.ts", "worker", "createEngine + engineVersion."],
+  ["packages/worker/test/", "worker", "Pipeline, estimate, taxonomy, schema-version, and end-to-end WASM XLSX tests."],
+  ["packages/worker/scripts/bundle-worker.mjs", "build", "esbuild self-contained dist/worker.js (no bare imports)."],
+
+  // sdk
+  ["packages/sdk/src/client.ts", "sdk", "ValidatorClient: events, profiles, packed-error decode, cancel(), pending queue."],
+  ["packages/sdk/src/defaults.ts", "sdk", "fast/balanced/strict profiles + size heuristics."],
+  ["packages/sdk/src/types.ts", "sdk", "Public options, events, fatal types."],
+  ["packages/sdk/src/workerFactory.ts", "sdk", "Worker construction from URL or factory."],
+  ["packages/sdk/src/report.ts", "sdk", "buildErrorReportCsv."],
+  ["packages/sdk/src/vite.ts", "sdk", "defaultWorkerUrl helper for Vite."],
+  ["packages/sdk/src/index.ts", "sdk", "createValidator + public exports."],
+  ["packages/sdk/test/client-profile.test.mjs", "sdk", "Profile/default behavior tests."],
+
+  // node
+  ["packages/node/src/index.ts", "node", "Node API: CSV validateFile/Buffer/Stream + Excel validateXlsxFile/Buffer/Stream."],
+  ["packages/node/test/node-validate.test.mjs", "node", "CSV + XLSX package tests."],
+
+  // bindings
+  ["bindings/include/import_validator.h", "bindings", "C header — the authoritative native API contract."],
+  ["bindings/python/import_validator.py", "bindings", "ctypes wrapper: Engine, validate_bytes/file, validate_xlsx_bytes/file, decoded errors."],
+  ["bindings/csharp/ImportValidator.cs", "bindings", "P/Invoke wrapper: Engine, Validator.Validate*, XLSX one-shot."],
+  ["bindings/go/import_validator.go", "bindings", "cgo wrapper: Engine, Validate*, ValidateReader, XLSX one-shot."],
+
+  // examples
+  ["examples/vite-ts-demo/", "examples", "Browser demo: drag-drop validation, estimates, metrics, modifier playground."],
+  ["examples/node_server/", "examples", "Express server: streaming CSV + XLSX validation endpoints."],
+  ["examples/python_server/", "examples", "Flask server over the Python binding (CSV + XLSX)."],
+  ["examples/csharp_server/", "examples", "ASP.NET minimal API over the C# binding (CSV + XLSX)."],
+  ["examples/go_server/", "examples", "net/http server over the Go binding (CSV + XLSX)."],
+  ["examples/csv-generator/", "examples", "Deterministic large-CSV test-data generator."],
+
+  // docs
+  ["docs/ARCHITECTURE.md", "docs", "How everything fits: components, data flow, design decisions, invariants."],
+  ["docs/CODE_MAP.md", "docs", "This map in text form: every file and when to change it."],
+  ["docs/PERFORMANCE.md", "docs", "Hot-path internals, before/after numbers, tuning guide, memory model."],
+  ["docs/BENCHMARKS.md", "docs", "Auto-generated benchmark tables (pnpm run bench)."],
+  ["docs/SCHEMA_REFERENCE.md", "docs", "Schema contract: fields, types, modifiers, error codes."],
+  ["docs/SDK_API.md", "docs", "Browser SDK API + events + fatal codes."],
+  ["docs/guides/", "docs", "Per-language integration guides: TS, Node, Python, C#, Go, Rust."],
+  ["docs/INDEX.md", "docs", "Documentation index."],
+  ["docs/validation-config.schema.json", "docs", "Machine-readable schema contract (JSON Schema)."],
+
+  // build / CI
+  ["scripts/bench.mjs", "build", "CSV/XLSX/estimate benchmark suite → BENCHMARKS.md."],
+  ["scripts/build-native.sh", "build", "Native cdylib build for the FFI bindings."],
+  ["scripts/build-customer-kit.mjs", "build", "Customer kit: tarballs, static worker/wasm, docs, integrity checks."],
+  [".github/workflows/ci.yml", "build", "CI: fmt/clippy/tests both tiers, builds, JS tests, bindings compile, kit."],
+  [".github/workflows/release-native.yml", "build", "Tagged native releases: 3 OS × 2 tiers with a test gate."],
+];
+
+const EDGES_RAW = [
+  // Rust internals
+  ["crates/validator/src/lib.rs", "crates/validator/src/engine.rs"],
+  ["crates/validator/src/lib.rs", "crates/validator/src/api.rs"],
+  ["crates/validator/src/lib.rs", "crates/validator/src/wasm_api.rs"],
+  ["crates/validator/src/lib.rs", "crates/validator/src/ffi.rs"],
+  ["crates/validator/src/engine.rs", "crates/validator/src/schema.rs"],
+  ["crates/validator/src/engine.rs", "crates/validator/src/errors.rs"],
+  ["crates/validator/src/engine.rs", "crates/validator/src/typecheck.rs"],
+  ["crates/validator/src/engine.rs", "crates/validator/src/modifiers.rs"],
+  ["crates/validator/src/engine.rs", "crates/validator/src/fingerprint.rs"],
+  ["crates/validator/src/engine.rs", "crates/validator/src/counter.rs"],
+  ["crates/validator/src/engine.rs", "crates/validator/src/xlsx/scanner.rs"],
+  ["crates/validator/src/engine.rs", "crates/validator/src/xlsx/shared.rs"],
+  ["crates/validator/src/xlsx/scanner.rs", "crates/validator/src/xlsx/xml.rs"],
+  ["crates/validator/src/xlsx/shared.rs", "crates/validator/src/xlsx/xml.rs"],
+  ["crates/validator/src/xlsx/zip.rs", "crates/validator/src/engine.rs"],
+  ["crates/validator/src/api.rs", "crates/validator/src/engine.rs"],
+  ["crates/validator/src/api.rs", "crates/validator/src/xlsx/zip.rs"],
+  ["crates/validator/src/wasm_api.rs", "crates/validator/src/engine.rs"],
+  ["crates/validator/src/wasm_api.rs", "crates/validator/src/counter.rs"],
+  ["crates/validator/src/wasm_api.rs", "crates/validator/src/xlsx/scanner.rs"],
+  ["crates/validator/src/ffi.rs", "crates/validator/src/engine.rs"],
+  ["crates/validator/src/ffi.rs", "crates/validator/src/xlsx/zip.rs"],
+  ["crates/validator/tests/xlsx_integration.rs", "crates/validator/src/api.rs"],
+  ["crates/validator/examples/validate_csv.rs", "crates/validator/src/api.rs"],
+  ["crates/validator/examples/validate_xlsx.rs", "crates/validator/src/api.rs"],
+  ["crates/validator/Cargo.toml", "crates/validator/src/lib.rs"],
+
+  // WASM boundary
+  ["packages/core/src/wasm/index.ts", "crates/validator/src/wasm_api.rs"],
+  ["packages/core/src/engine.ts", "packages/core/src/wasm/index.ts"],
+  ["packages/core/src/engine.ts", "packages/core/src/types.ts"],
+  ["packages/core/src/validate/validateCsv.ts", "packages/core/src/engine.ts"],
+  ["packages/core/src/validate/validateCsv.ts", "packages/core/src/validate/sources.ts"],
+  ["packages/core/src/validate/validateCsv.ts", "packages/core/src/validate/chooseChunkSize.ts"],
+  ["packages/core/src/index.ts", "packages/core/src/engine.ts"],
+  ["packages/core/src/index.ts", "packages/core/src/validate/validateCsv.ts"],
+  ["packages/core/src/index.ts", "packages/core/src/xlsx/zip.ts"],
+  ["packages/core/src/index.ts", "packages/core/src/validate/chooseChunkSize.ts"],
+  ["packages/core/scripts/build-wasm.mjs", "crates/validator/Cargo.toml"],
+
+  // worker
+  ["packages/worker/src/worker.ts", "packages/worker/src/protocol.ts"],
+  ["packages/worker/src/worker.ts", "packages/worker/src/loaders/wasmLoader.ts"],
+  ["packages/worker/src/worker.ts", "packages/worker/src/errorTaxonomy.ts"],
+  ["packages/worker/src/worker.ts", "packages/worker/src/flow.ts"],
+  ["packages/worker/src/worker.ts", "packages/worker/src/pipeline/csvPipeline.ts"],
+  ["packages/worker/src/worker.ts", "packages/worker/src/pipeline/xlsxPipeline.ts"],
+  ["packages/worker/src/worker.ts", "packages/worker/src/pipeline/estimateCsv.ts"],
+  ["packages/worker/src/pipeline/csvPipeline.ts", "packages/core/src/engine.ts"],
+  ["packages/worker/src/pipeline/csvPipeline.ts", "packages/worker/src/protocol.ts"],
+  ["packages/worker/src/pipeline/xlsxPipeline.ts", "packages/core/src/xlsx/zip.ts"],
+  ["packages/worker/src/pipeline/xlsxPipeline.ts", "packages/core/src/engine.ts"],
+  ["packages/worker/src/pipeline/xlsxPipeline.ts", "packages/worker/src/pipeline/csvPipeline.ts"],
+  ["packages/worker/src/pipeline/estimateCsv.ts", "packages/core/src/engine.ts"],
+  ["packages/worker/src/pipeline/estimateCsv.ts", "packages/worker/src/pipeline/csvPipeline.ts"],
+  ["packages/worker/src/errorTaxonomy.ts", "packages/worker/src/protocol.ts"],
+  ["packages/worker/src/flow.ts", "packages/worker/src/protocol.ts"],
+  ["packages/worker/src/loaders/wasmLoader.ts", "packages/core/src/engine.ts"],
+  ["packages/worker/test/", "packages/worker/src/pipeline/csvPipeline.ts"],
+  ["packages/worker/test/", "packages/worker/src/pipeline/xlsxPipeline.ts"],
+  ["packages/worker/test/", "packages/worker/src/pipeline/estimateCsv.ts"],
+  ["packages/worker/scripts/bundle-worker.mjs", "packages/worker/src/worker.ts"],
+
+  // sdk
+  ["packages/sdk/src/client.ts", "packages/sdk/src/workerFactory.ts"],
+  ["packages/sdk/src/client.ts", "packages/sdk/src/defaults.ts"],
+  ["packages/sdk/src/client.ts", "packages/sdk/src/types.ts"],
+  ["packages/sdk/src/client.ts", "packages/core/src/engine.ts"],
+  ["packages/sdk/src/client.ts", "packages/worker/src/protocol.ts"],
+  ["packages/sdk/src/index.ts", "packages/sdk/src/client.ts"],
+  ["packages/sdk/src/index.ts", "packages/sdk/src/report.ts"],
+  ["packages/sdk/src/vite.ts", "packages/worker/src/worker.ts"],
+  ["packages/sdk/test/client-profile.test.mjs", "packages/sdk/src/client.ts"],
+
+  // node
+  ["packages/node/src/index.ts", "packages/core/src/index.ts"],
+  ["packages/node/src/index.ts", "packages/core/src/xlsx/zip.ts"],
+  ["packages/node/test/node-validate.test.mjs", "packages/node/src/index.ts"],
+
+  // bindings
+  ["bindings/include/import_validator.h", "crates/validator/src/ffi.rs"],
+  ["bindings/python/import_validator.py", "bindings/include/import_validator.h"],
+  ["bindings/csharp/ImportValidator.cs", "bindings/include/import_validator.h"],
+  ["bindings/go/import_validator.go", "bindings/include/import_validator.h"],
+
+  // examples
+  ["examples/vite-ts-demo/", "packages/sdk/src/index.ts"],
+  ["examples/vite-ts-demo/", "packages/sdk/src/vite.ts"],
+  ["examples/node_server/", "packages/node/src/index.ts"],
+  ["examples/python_server/", "bindings/python/import_validator.py"],
+  ["examples/csharp_server/", "bindings/csharp/ImportValidator.cs"],
+  ["examples/go_server/", "bindings/go/import_validator.go"],
+  ["examples/csv-generator/", "examples/vite-ts-demo/"],
+
+  // build / CI / docs
+  ["scripts/bench.mjs", "packages/node/src/index.ts"],
+  ["scripts/bench.mjs", "docs/BENCHMARKS.md"],
+  ["scripts/build-native.sh", "crates/validator/Cargo.toml"],
+  ["scripts/build-customer-kit.mjs", "packages/worker/scripts/bundle-worker.mjs"],
+  ["scripts/build-customer-kit.mjs", "docs/guides/"],
+  [".github/workflows/ci.yml", "scripts/build-customer-kit.mjs"],
+  [".github/workflows/ci.yml", "bindings/python/import_validator.py"],
+  [".github/workflows/ci.yml", "bindings/csharp/ImportValidator.cs"],
+  [".github/workflows/ci.yml", "bindings/go/import_validator.go"],
+  [".github/workflows/release-native.yml", "scripts/build-native.sh"],
+
+  ["docs/ARCHITECTURE.md", "docs/CODE_MAP.md"],
+  ["docs/ARCHITECTURE.md", "docs/PERFORMANCE.md"],
+  ["docs/PERFORMANCE.md", "docs/BENCHMARKS.md"],
+  ["docs/INDEX.md", "docs/ARCHITECTURE.md"],
+  ["docs/INDEX.md", "docs/SCHEMA_REFERENCE.md"],
+  ["docs/INDEX.md", "docs/SDK_API.md"],
+  ["docs/INDEX.md", "docs/guides/"],
+  ["docs/SCHEMA_REFERENCE.md", "docs/validation-config.schema.json"],
+  ["docs/SDK_API.md", "packages/sdk/src/index.ts"],
+  ["docs/guides/", "bindings/python/import_validator.py"],
+  ["docs/guides/", "bindings/csharp/ImportValidator.cs"],
+  ["docs/guides/", "bindings/go/import_validator.go"],
+  ["docs/guides/", "packages/node/src/index.ts"],
+  ["docs/guides/", "crates/validator/src/api.rs"],
+  ["docs/SCHEMA_REFERENCE.md", "crates/validator/src/schema.rs"],
+];
+
+// ── Build graph structures ───────────────────────────────────────────────────
+const nodes = NODES_RAW.map(([id, area, desc], i) => ({
+  i, id, area, desc,
+  label: id.replace(/\/$/, "").split("/").pop(),
+  x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0,
+  sx: 0, sy: 0, ss: 1, depth: 0,
+  degree: 0,
+}));
+const byId = new Map(nodes.map(n => [n.id, n]));
+const edges = EDGES_RAW
+  .filter(([a, b]) => byId.has(a) && byId.has(b))
+  .map(([a, b]) => ({ a: byId.get(a), b: byId.get(b) }));
+for (const e of edges) { e.a.degree++; e.b.degree++; }
+const neighbors = new Map(nodes.map(n => [n, new Set()]));
+for (const e of edges) { neighbors.get(e.a).add(e.b); neighbors.get(e.b).add(e.a); }
+
+// deterministic-ish seeded placement on a sphere, clustered by area
+const areaKeys = Object.keys(AREAS);
+let seed = 1337;
+const rand = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+const areaCenters = new Map(areaKeys.map((k, idx) => {
+  const phi = Math.acos(1 - 2 * (idx + 0.5) / areaKeys.length);
+  const theta = Math.PI * (1 + Math.sqrt(5)) * idx;
+  const R = 240;
+  return [k, {
+    x: R * Math.sin(phi) * Math.cos(theta),
+    y: R * Math.sin(phi) * Math.sin(theta),
+    z: R * Math.cos(phi),
+  }];
+}));
+for (const n of nodes) {
+  const c = areaCenters.get(n.area);
+  n.x = c.x + (rand() - 0.5) * 160;
+  n.y = c.y + (rand() - 0.5) * 160;
+  n.z = c.z + (rand() - 0.5) * 160;
+}
+
+// ── Simulation ───────────────────────────────────────────────────────────────
+let alpha = 1;
+function tick() {
+  const REPULSE = 5200, SPRING = 0.028, REST = 95, CENTER = 0.0016, DAMP = 0.86;
+  for (let i = 0; i < nodes.length; i++) {
+    const a = nodes[i];
+    for (let j = i + 1; j < nodes.length; j++) {
+      const b = nodes[j];
+      let dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+      let d2 = dx * dx + dy * dy + dz * dz + 0.01;
+      if (d2 > 250000) continue;
+      const f = Math.min(REPULSE / d2, 12) * alpha;
+      const d = Math.sqrt(d2);
+      dx /= d; dy /= d; dz /= d;
+      a.vx += dx * f; a.vy += dy * f; a.vz += dz * f;
+      b.vx -= dx * f; b.vy -= dy * f; b.vz -= dz * f;
+    }
+  }
+  for (const e of edges) {
+    const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y, dz = e.b.z - e.a.z;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz) + 0.01;
+    const f = (d - REST) * SPRING * alpha;
+    const ux = dx / d, uy = dy / d, uz = dz / d;
+    e.a.vx += ux * f; e.a.vy += uy * f; e.a.vz += uz * f;
+    e.b.vx -= ux * f; e.b.vy -= uy * f; e.b.vz -= uz * f;
+  }
+  for (const n of nodes) {
+    n.vx -= n.x * CENTER * alpha;
+    n.vy -= n.y * CENTER * alpha;
+    n.vz -= n.z * CENTER * alpha;
+    n.vx *= DAMP; n.vy *= DAMP; n.vz *= DAMP;
+    n.x += n.vx; n.y += n.vy; n.z += n.vz;
+  }
+  alpha = Math.max(0.02, alpha * 0.996);
+}
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+const canvas = document.getElementById("scene");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  canvas.style.width = W + "px"; canvas.style.height = H + "px";
+}
+window.addEventListener("resize", resize);
+resize();
+
+let rotX = -0.28, rotY = 0.6, zoom = 1.05;
+const FOCAL = 1050;
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+let autoRotate = !reducedMotion;
+
+let selected = null, hovered = null;
+let searchTerm = "";
+const areaOn = Object.fromEntries(areaKeys.map(k => [k, true]));
+
+function isDark() {
+  const t = document.documentElement.getAttribute("data-theme");
+  if (t === "dark") return true;
+  if (t === "light") return false;
+  return !window.matchMedia("(prefers-color-scheme: light)").matches;
+}
+
+function project() {
+  const cX = Math.cos(rotX), sX = Math.sin(rotX);
+  const cY = Math.cos(rotY), sY = Math.sin(rotY);
+  for (const n of nodes) {
+    // rotate Y then X
+    const x1 = n.x * cY + n.z * sY;
+    const z1 = -n.x * sY + n.z * cY;
+    const y2 = n.y * cX - z1 * sX;
+    const z2 = n.y * sX + z1 * cX;
+    const s = FOCAL / (FOCAL + z2);
+    n.sx = W / 2 + x1 * s * zoom;
+    n.sy = H / 2 + y2 * s * zoom;
+    n.ss = s * zoom;
+    n.depth = z2;
+  }
+}
+
+function nodeVisibility(n) {
+  // 1 = full, dimmed values for filtered/unfocused
+  let v = areaOn[n.area] ? 1 : 0.06;
+  if (searchTerm) {
+    v = Math.min(v, n.id.toLowerCase().includes(searchTerm) ? 1 : 0.08);
+  }
+  if (selected) {
+    const related = n === selected || neighbors.get(selected).has(n);
+    v = Math.min(v, related ? 1 : 0.07);
+  }
+  return v;
+}
+
+function draw() {
+  const dark = isDark();
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  // subtle depth vignette
+  const bgGlow = ctx.createRadialGradient(W / 2, H / 2, 80, W / 2, H / 2, Math.max(W, H) * 0.75);
+  if (dark) {
+    bgGlow.addColorStop(0, "rgba(52,66,94,0.16)");
+    bgGlow.addColorStop(1, "rgba(0,0,0,0)");
+  } else {
+    bgGlow.addColorStop(0, "rgba(255,255,255,0.75)");
+    bgGlow.addColorStop(1, "rgba(255,255,255,0)");
+  }
+  ctx.fillStyle = bgGlow;
+  ctx.fillRect(0, 0, W, H);
+
+  // edges
+  ctx.lineWidth = 1;
+  for (const e of edges) {
+    const va = nodeVisibility(e.a), vb = nodeVisibility(e.b);
+    const v = Math.min(va, vb);
+    if (v <= 0.061) continue;
+    const depthFade = Math.max(0.25, Math.min(1, (FOCAL - (e.a.depth + e.b.depth) / 2) / FOCAL));
+    const base = dark ? 190 : 90;
+    const focusEdge = selected && (e.a === selected || e.b === selected);
+    ctx.strokeStyle = focusEdge
+      ? (dark ? `rgba(232,236,243,${0.65 * depthFade})` : `rgba(26,34,48,${0.55 * depthFade})`)
+      : (dark ? `rgba(${base},${base + 12},${base + 30},${0.16 * depthFade * v})`
+              : `rgba(${base},${base + 8},${base + 20},${0.22 * depthFade * v})`);
+    ctx.beginPath();
+    ctx.moveTo(e.a.sx, e.a.sy);
+    ctx.lineTo(e.b.sx, e.b.sy);
+    ctx.stroke();
+  }
+
+  // nodes back-to-front
+  const order = [...nodes].sort((a, b) => b.depth - a.depth);
+  ctx.textBaseline = "middle";
+  for (const n of order) {
+    const v = nodeVisibility(n);
+    const color = AREAS[n.area].color;
+    const r = (3.4 + Math.min(9, n.degree * 0.8)) * n.ss;
+    const depthFade = Math.max(0.35, Math.min(1, (FOCAL - n.depth) / FOCAL));
+    const a = v * depthFade;
+
+    if (a > 0.5 && (n === hovered || n === selected)) {
+      ctx.beginPath();
+      ctx.arc(n.sx, n.sy, r + 6, 0, Math.PI * 2);
+      ctx.fillStyle = hexA(color, 0.22);
+      ctx.fill();
+    }
+    // glow
+    if (a > 0.2) {
+      const g = ctx.createRadialGradient(n.sx, n.sy, 0, n.sx, n.sy, r * 2.6);
+      g.addColorStop(0, hexA(color, 0.5 * a));
+      g.addColorStop(1, hexA(color, 0));
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(n.sx, n.sy, r * 2.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.beginPath();
+    ctx.arc(n.sx, n.sy, r, 0, Math.PI * 2);
+    ctx.fillStyle = hexA(color, Math.max(0.12, a));
+    ctx.fill();
+    if (n === selected) {
+      ctx.lineWidth = 1.6;
+      ctx.strokeStyle = dark ? "#e8ecf3" : "#1a2230";
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
+
+    // labels: hovered, selected, neighbors of selected, or hubs when zoomed
+    const showLabel =
+      a > 0.4 &&
+      (n === hovered || n === selected ||
+        (selected && neighbors.get(selected).has(n)) ||
+        (!selected && !searchTerm && n.degree >= 7 && zoom > 0.9) ||
+        (searchTerm && n.id.toLowerCase().includes(searchTerm)) ||
+        zoom > 2.1);
+    if (showLabel) {
+      const fs = Math.max(10, Math.min(13, 11 * n.ss));
+      ctx.font = `${n === selected ? "600 " : ""}${fs}px ui-monospace, SF Mono, Menlo, Consolas, monospace`;
+      const tx = n.sx + r + 6, ty = n.sy;
+      const tw = ctx.measureText(n.label).width;
+      ctx.fillStyle = dark ? `rgba(14,17,22,${0.75 * a})` : `rgba(245,246,248,${0.85 * a})`;
+      ctx.fillRect(tx - 3, ty - fs * 0.75, tw + 6, fs * 1.5);
+      ctx.fillStyle = dark ? `rgba(232,236,243,${a})` : `rgba(26,34,48,${a})`;
+      ctx.fillText(n.label, tx, ty);
+    }
+  }
+}
+
+function hexA(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${Math.max(0, Math.min(1, alpha))})`;
+}
+
+// ── Interaction ──────────────────────────────────────────────────────────────
+let dragging = false, moved = false, lastX = 0, lastY = 0, vRotX = 0, vRotY = 0;
+
+canvas.addEventListener("pointerdown", (e) => {
+  dragging = true; moved = false;
+  lastX = e.clientX; lastY = e.clientY;
+  canvas.classList.add("dragging");
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (dragging) {
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    rotY += dx * 0.005; rotX += dy * 0.005;
+    vRotY = dx * 0.005; vRotX = dy * 0.005;
+    rotX = Math.max(-1.5, Math.min(1.5, rotX));
+    lastX = e.clientX; lastY = e.clientY;
+    autoRotate = false;
+  } else {
+    hovered = pick(e.clientX, e.clientY);
+    canvas.style.cursor = hovered ? "pointer" : "grab";
+  }
+});
+window.addEventListener("pointerup", (e) => {
+  if (dragging && !moved) {
+    const n = pick(e.clientX, e.clientY);
+    select(n === selected ? null : n);
+  }
+  dragging = false;
+  canvas.classList.remove("dragging");
+});
+canvas.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  zoom *= Math.exp(-e.deltaY * 0.0011);
+  zoom = Math.max(0.3, Math.min(3.4, zoom));
+}, { passive: false });
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { select(null); searchInput.value = ""; searchTerm = ""; }
+});
+
+function pick(px, py) {
+  let best = null, bestD = 18 * 18;
+  for (const n of nodes) {
+    if (nodeVisibility(n) < 0.5) continue;
+    const dx = n.sx - px, dy = n.sy - py;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = n; }
+  }
+  return best;
+}
+
+// ── Detail card ──────────────────────────────────────────────────────────────
+const card = document.getElementById("card");
+const cardPath = document.getElementById("cardPath");
+const cardArea = document.getElementById("cardArea");
+const cardDot = document.getElementById("cardDot");
+const cardDesc = document.getElementById("cardDesc");
+const cardLinks = document.getElementById("cardLinks");
+document.getElementById("cardClose").addEventListener("click", () => select(null));
+
+function select(n) {
+  selected = n;
+  if (!n) { card.classList.remove("show"); return; }
+  cardPath.textContent = n.id;
+  cardArea.textContent = AREAS[n.area].label;
+  cardDot.style.background = AREAS[n.area].color;
+  cardDesc.textContent = n.desc;
+  cardLinks.innerHTML = "";
+  const ns = [...neighbors.get(n)].sort((a, b) => b.degree - a.degree);
+  for (const m of ns) {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.textContent = m.id;
+    btn.style.borderLeft = `3px solid ${AREAS[m.area].color}`;
+    btn.addEventListener("click", () => select(m));
+    li.appendChild(btn);
+    cardLinks.appendChild(li);
+  }
+  document.getElementById("cardLinksH").textContent = `Connections (${ns.length})`;
+  card.classList.add("show");
+  alpha = Math.max(alpha, 0.12);
+}
+
+// ── Search + chips ───────────────────────────────────────────────────────────
+const searchInput = document.getElementById("search");
+searchInput.addEventListener("input", () => {
+  searchTerm = searchInput.value.trim().toLowerCase();
+});
+searchInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && searchTerm) {
+    const match = nodes
+      .filter(n => n.id.toLowerCase().includes(searchTerm))
+      .sort((a, b) => b.degree - a.degree)[0];
+    if (match) select(match);
+  }
+});
+
+const chipsEl = document.getElementById("chips");
+for (const k of areaKeys) {
+  const chip = document.createElement("button");
+  chip.className = "chip on";
+  chip.style.setProperty("--c", AREAS[k].color);
+  chip.innerHTML = `<span class="dot"></span>${AREAS[k].label}`;
+  chip.setAttribute("aria-pressed", "true");
+  chip.addEventListener("click", () => {
+    areaOn[k] = !areaOn[k];
+    chip.classList.toggle("on", areaOn[k]);
+    chip.setAttribute("aria-pressed", String(areaOn[k]));
+  });
+  chipsEl.appendChild(chip);
+}
+
+// ── Main loop ────────────────────────────────────────────────────────────────
+function frame() {
+  if (alpha > 0.021) tick();
+  if (autoRotate) rotY += 0.0016;
+  else if (!dragging) {
+    rotY += vRotY *= 0.94;
+    rotX = Math.max(-1.5, Math.min(1.5, rotX + (vRotX *= 0.94)));
+  }
+  project();
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>

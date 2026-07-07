@@ -44,8 +44,12 @@ Support strong data correction plus validation in import-validator:
 - Add row-level composite uniqueness:
   - unique key across multiple columns.
 
-## Phase 4 (Next)
+## Phase 4 (Open — not started)
 - Add prebuilt customer profiles for common data domains:
   - names/emails/phone/address normalization packs
   - finance amount precision packs
   - compliance-focused strict duplicate policy packs.
+
+Note: `docs/customer-profiles.json` is NOT this deliverable — it holds
+runtime tuning presets (limits/profiles per tenant). Phase 4 is about
+reusable schema/modifier packs and remains fully open.

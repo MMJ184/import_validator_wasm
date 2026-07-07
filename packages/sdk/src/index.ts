@@ -25,3 +25,4 @@ export type {
     ValidationFatalPhase
 };
 export { buildErrorReportCsv } from "./report.js";
+export { concatChunks } from "@import-validator/core";
