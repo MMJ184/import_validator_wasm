@@ -33,6 +33,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -45,19 +46,39 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Rust tests
-        run: cargo test --manifest-path crates/validator/Cargo.toml
+      - name: Rust format check
+        run: cargo fmt --manifest-path crates/validator/Cargo.toml --check
+
+      - name: Rust lints (clippy, both tiers)
+        run: |
+          cargo clippy --manifest-path crates/validator/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path crates/validator/Cargo.toml --all-targets --features pattern -- -D warnings
+
+      - name: Rust tests (default + pattern tier)
+        run: |
+          cargo test --manifest-path crates/validator/Cargo.toml
+          cargo test --manifest-path crates/validator/Cargo.toml --features pattern
 
       # Build before typecheck: worker/sdk type resolution needs core's dist
       # and the generated wasm pkg, neither of which exist on a fresh checkout.
       - name: Build (traced)
         run: pnpm run build:trace
 
+      - name: Full-tier WASM builds (pattern feature must stay green)
+        run: WASM_FEATURES=pattern pnpm --filter @import-validator/core run build:wasm
+
+      # Restore the fast-tier pkg for the remaining steps
+      - name: Rebuild fast-tier WASM
+        run: pnpm --filter @import-validator/core run build:wasm && pnpm --filter @import-validator/core run build:pkg
+
       - name: Typecheck
         run: pnpm run typecheck
 
       - name: JS tests
         run: pnpm run test
+
+      - name: Rust crate examples compile
+        run: cargo build --manifest-path crates/validator/Cargo.toml --examples
 
       - name: Assemble customer kit
         run: pnpm run dist:customer
@@ -74,3 +95,70 @@ jobs:
         with:
           name: customer-kit
           path: artifacts/import-validator-kit-*.zip
+
+  bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/validator
+
+      - name: Build native library
+        run: ./scripts/build-native.sh
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: C# binding compiles
+        run: dotnet build bindings/csharp/ImportValidator.csproj -c Release
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Go binding vets and builds
+        working-directory: bindings/go
+        run: |
+          export CGO_CFLAGS="-I${GITHUB_WORKSPACE}/bindings/include"
+          export CGO_LDFLAGS="-L${GITHUB_WORKSPACE}/crates/validator/target/release"
+          go vet ./...
+          go build ./...
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python binding smoke test
+        env:
+          IMPORT_VALIDATOR_LIB: ${{ github.workspace }}/crates/validator/target/release/libimport_validator.so
+        run: |
+          python -m compileall bindings/python/import_validator.py
+          python - <<'EOF'
+          import json, sys
+          sys.path.insert(0, "bindings/python")
+          import import_validator as iv
+
+          schema = json.dumps({
+              "hasHeaders": True,
+              "columns": [
+                  {"name": "id", "type": "int", "required": True, "unique": True},
+                  {"name": "email", "type": "email", "required": True},
+              ],
+          })
+          result = iv.validate_bytes(b"id,email\n1,a@b.com\n1,broken\n", schema)
+          codes = sorted(e.code_name for e in result.errors)
+          assert codes == ["DuplicateValue", "InvalidEmail"], codes
+          assert all(e.column_name for e in result.errors)
+          print("python binding smoke: OK", codes)
+          EOF

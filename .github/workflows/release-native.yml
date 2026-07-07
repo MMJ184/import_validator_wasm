@@ -60,6 +60,12 @@ jobs:
         with:
           workspaces: crates/validator
 
+      - name: Test (gate before shipping binaries)
+        shell: bash
+        run: |
+          cargo test --manifest-path crates/validator/Cargo.toml \
+            ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+
       - name: Build
         shell: bash
         run: |
