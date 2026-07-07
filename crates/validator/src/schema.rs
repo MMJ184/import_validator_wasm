@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use serde::de::{self, Deserializer};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 fn default_delimiter() -> u8 {
@@ -22,10 +22,14 @@ where
             if b.len() == 1 {
                 Ok(b[0])
             } else {
-                Err(de::Error::custom("delimiter must be a single character string (e.g. \",\" or \";\")"))
+                Err(de::Error::custom(
+                    "delimiter must be a single character string (e.g. \",\" or \";\")",
+                ))
             }
         }
-        _ => Err(de::Error::custom("delimiter must be a number or a single character string")),
+        _ => Err(de::Error::custom(
+            "delimiter must be a number or a single character string",
+        )),
     }
 }
 
@@ -35,7 +39,10 @@ where
 pub struct Schema {
     pub has_headers: bool,
 
-    #[serde(default = "default_delimiter", deserialize_with = "deserialize_delimiter")]
+    #[serde(
+        default = "default_delimiter",
+        deserialize_with = "deserialize_delimiter"
+    )]
     pub delimiter: u8, // stored as byte internally
 
     #[serde(default)]
@@ -218,9 +225,9 @@ pub enum ColumnType {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DateFormat {
-    YmdDash,   // "ymd-dash"
-    DmySlash,  // "dmy-slash"
-    MdySlash,  // "mdy-slash"
+    YmdDash,  // "ymd-dash"
+    DmySlash, // "dmy-slash"
+    MdySlash, // "mdy-slash"
 }
 
 #[derive(Debug, Clone, Serialize)]
