@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "dgSpecHash": "4C2k6QYN0fM=",
+  "success": true,
+  "projectFilePath": "/Users/mmj/Work/My/wsam/import_validator_wasm/bindings/csharp/ImportValidator.csproj",
+  "expectedPackageFiles": [
+    "/Users/mmj/.nuget/packages/netstandard.library.ref/2.1.0/netstandard.library.ref.2.1.0.nupkg.sha512"
+  ],
+  "logs": []
+}

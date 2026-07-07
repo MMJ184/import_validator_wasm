@@ -1,0 +1,10 @@
+/Users/mmj/Work/My/wsam/import_validator_wasm/bindings/csharp/bin/Debug/netstandard2.1/ImportValidator.deps.json
+/Users/mmj/Work/My/wsam/import_validator_wasm/bindings/csharp/bin/Debug/netstandard2.1/ImportValidator.dll
+/Users/mmj/Work/My/wsam/import_validator_wasm/bindings/csharp/bin/Debug/netstandard2.1/ImportValidator.pdb
+/Users/mmj/Work/My/wsam/import_validator_wasm/bindings/csharp/obj/Debug/netstandard2.1/ImportValidator.GeneratedMSBuildEditorConfig.editorconfig
+/Users/mmj/Work/My/wsam/import_validator_wasm/bindings/csharp/obj/Debug/netstandard2.1/ImportValidator.AssemblyInfoInputs.cache
+/Users/mmj/Work/My/wsam/import_validator_wasm/bindings/csharp/obj/Debug/netstandard2.1/ImportValidator.AssemblyInfo.cs
+/Users/mmj/Work/My/wsam/import_validator_wasm/bindings/csharp/obj/Debug/netstandard2.1/ImportValidator.csproj.CoreCompileInputs.cache
+/Users/mmj/Work/My/wsam/import_validator_wasm/bindings/csharp/obj/Debug/netstandard2.1/ImportValidator.sourcelink.json
+/Users/mmj/Work/My/wsam/import_validator_wasm/bindings/csharp/obj/Debug/netstandard2.1/ImportValidator.dll
+/Users/mmj/Work/My/wsam/import_validator_wasm/bindings/csharp/obj/Debug/netstandard2.1/ImportValidator.pdb
