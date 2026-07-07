@@ -9,7 +9,10 @@ import type {
     ValidatorOptions
 } from "./types.js";
 import {chooseEmitNormalizedSmart, chooseMaxErrorsSmart, profileDefaults} from "./defaults.js";
-import { chooseChunkSizeSmart } from "@import-validator/core";
+import { chooseChunkSizeSmart, decodePackedErrors } from "@import-validator/core";
+
+/** Protocol version this SDK speaks (packed errors + cancel). */
+const SDK_PROTOCOL_VERSION = 2;
 
 export class ValidatorClient {
     private worker: Worker;
@@ -17,7 +20,7 @@ export class ValidatorClient {
     private baseProfile: ValidationProfile;
 
     private isReady = false;
-    private pendingValidate: { file: File; options?: ValidateFileOptions } | null = null;
+    private pendingValidates: Array<{ file: File; options?: ValidateFileOptions }> = [];
 
     constructor(opts: ValidatorOptions, events: ValidatorEvents = {}) {
         this.events = events;
@@ -38,11 +41,10 @@ export class ValidatorClient {
                     this.isReady = true;
                     events.onReady?.(m.columns);
 
-                    // flush queued validate if user called validate early
-                    if (this.pendingValidate) {
-                        const { file, options } = this.pendingValidate;
-                        this.pendingValidate = null;
-                        this.validate(file, options);
+                    // flush validates queued before the worker became ready
+                    while (this.pendingValidates.length) {
+                        const next = this.pendingValidates.shift()!;
+                        this.validate(next.file, next.options);
                     }
                     break;
                 case "estimate":
@@ -56,7 +58,15 @@ export class ValidatorClient {
                     events.onProgress?.(m.progress);
                     break;
                 case "errors":
+                    // v1 path (older worker): pre-decoded error objects
                     events.onErrors?.(m.errors);
+                    break;
+                case "errorsPacked":
+                    // v2 path: packed u32 pairs transferred zero-copy from the
+                    // worker; decode into the same DecodedError[] shape here.
+                    events.onErrors?.(
+                        decodePackedErrors(m.packed, m.schemaColumns, m.inputColumns)
+                    );
                     break;
                 case "normalized":
                     events.onNormalized?.(m.chunk);
@@ -83,12 +93,13 @@ export class ValidatorClient {
             schemaVersion: opts.schemaVersion ?? 1,
             maxErrors: opts.maxErrors ?? 10_000,
             emitNormalized: opts.emitNormalized ?? baseDefaults.emitNormalized,
+            protocolVersion: SDK_PROTOCOL_VERSION,
         });
     }
 
     validate(file: File, options?: ValidateFileOptions) {
         if (!this.isReady) {
-            this.pendingValidate = { file, options };
+            this.pendingValidates.push({ file, options });
             return;
         }
         validateRuntimeOptions(options);
@@ -135,6 +146,16 @@ export class ValidatorClient {
                 timeoutMs: options?.timeoutMs,
             }
         });
+    }
+
+    /**
+     * Cancel the currently running validation/estimate. The worker aborts
+     * cooperatively and reports a fatal with code "CANCELLED". Queued
+     * validates that have not reached the worker yet are also dropped.
+     */
+    cancel() {
+        this.pendingValidates.length = 0;
+        this.worker.postMessage({ type: "cancel" });
     }
 
     terminate() {

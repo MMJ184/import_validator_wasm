@@ -1,3 +1,6 @@
+import { CsvRowCounter, isWasmReady } from "@import-validator/core";
+import { macrotaskTick, streamFile } from "./csvPipeline.js";
+
 export type CsvEstimate = {
     rows: number;
     avgBytesPerRow: number;
@@ -10,6 +13,13 @@ export type CsvEstimateOptions = {
     signal?: AbortSignal;
 };
 
+/**
+ * Row/column estimate for a CSV file (exact counts — every byte is scanned).
+ *
+ * Uses the WASM RowCounter when the engine module is initialized (an order of
+ * magnitude faster than scanning bytes in JS); falls back to a JS scanner so
+ * standalone `estimate` requests before `init` keep working.
+ */
 export async function estimateCsv(
     file: File,
     chunkSize?: number,
@@ -18,6 +28,42 @@ export async function estimateCsv(
     const delimiter = resolveDelimiterByte(options.delimiter);
     const hasHeaders = options.hasHeaders ?? true;
 
+    const counts = isWasmReady()
+        ? await countRowsWasm(file, chunkSize, delimiter, options.signal)
+        : await countRowsJs(file, chunkSize, delimiter, options.signal);
+
+    const rows = hasHeaders ? Math.max(0, counts.rows - 1) : counts.rows;
+    const avgBytesPerRow = rows > 0 ? file.size / rows : file.size;
+
+    return { rows, avgBytesPerRow, columns: counts.firstRowColumns };
+}
+
+async function countRowsWasm(
+    file: File,
+    chunkSize: number | undefined,
+    delimiter: number,
+    signal?: AbortSignal
+): Promise<{ rows: number; firstRowColumns?: number }> {
+    const counter = await CsvRowCounter.create(delimiter);
+    for await (const chunk of streamFile(file, chunkSize, signal)) {
+        counter.push(chunk);
+        await macrotaskTick();
+    }
+    return counter.finish();
+}
+
+/**
+ * JS fallback scanner. Semantics mirror the Rust RowCounter exactly,
+ * including the CRLF fix (the '\n' of a CRLF pair must not clear the
+ * row-break flag — the legacy estimator counted a phantom trailing row for
+ * CRLF-terminated files).
+ */
+async function countRowsJs(
+    file: File,
+    chunkSize: number | undefined,
+    delimiter: number,
+    signal?: AbortSignal
+): Promise<{ rows: number; firstRowColumns?: number }> {
     let hasAnyByte = false;
     let totalRows = 0;
     let firstRowColumns: number | undefined;
@@ -37,14 +83,12 @@ export async function estimateCsv(
         prevCR = false;
     };
 
-    for await (const chunk of streamFile(file, chunkSize, options.signal)) {
+    for await (const chunk of streamFile(file, chunkSize, signal)) {
         if (!chunk.length) continue;
         hasAnyByte = true;
 
         for (let i = 0; i < chunk.length; i += 1) {
             const b = chunk[i];
-
-            if (endedWithRowBreak) endedWithRowBreak = false;
 
             if (quotePending) {
                 if (b === 34) {
@@ -59,6 +103,14 @@ export async function estimateCsv(
                 if (b === 34) quotePending = true;
                 continue;
             }
+
+            // CRLF second byte: same row break — must not clear the flag.
+            if (b === 10 && prevCR) {
+                prevCR = false;
+                continue;
+            }
+
+            if (endedWithRowBreak) endedWithRowBreak = false;
 
             if (b === 34) {
                 inQuotes = true;
@@ -78,10 +130,6 @@ export async function estimateCsv(
             }
 
             if (b === 10) {
-                if (prevCR) {
-                    prevCR = false;
-                    continue;
-                }
                 finishRow();
                 continue;
             }
@@ -99,39 +147,7 @@ export async function estimateCsv(
         finishRow();
     }
 
-    const rows = hasHeaders ? Math.max(0, totalRows - 1) : totalRows;
-    const avgBytesPerRow = rows > 0 ? file.size / rows : file.size;
-
-    return { rows, avgBytesPerRow, columns: firstRowColumns };
-}
-
-async function* streamFile(file: File, chunkSize?: number, signal?: AbortSignal): AsyncIterable<Uint8Array> {
-    if (chunkSize && chunkSize > 0) {
-        for (let offset = 0; offset < file.size; offset += chunkSize) {
-            if (signal?.aborted) throw abortedError();
-            const part = file.slice(offset, offset + chunkSize);
-            const buf = await part.arrayBuffer();
-            if (buf.byteLength) yield new Uint8Array(buf);
-        }
-        return;
-    }
-
-    const reader = file.stream().getReader();
-    try {
-        while (true) {
-            if (signal?.aborted) {
-                try {
-                    await reader.cancel();
-                } catch {}
-                throw abortedError();
-            }
-            const { value, done } = await reader.read();
-            if (done) break;
-            if (value?.length) yield value;
-        }
-    } finally {
-        reader.releaseLock();
-    }
+    return { rows: totalRows, firstRowColumns };
 }
 
 function resolveDelimiterByte(delimiter?: number | string): number {
@@ -142,8 +158,4 @@ function resolveDelimiterByte(delimiter?: number | string): number {
         return delimiter.charCodeAt(0);
     }
     return 44;
-}
-
-function abortedError() {
-    return new Error("Operation aborted");
 }

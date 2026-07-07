@@ -10,6 +10,7 @@ export type ValidationFatalCode =
     | "ROWS_LIMIT_EXCEEDED"
     | "COLUMNS_LIMIT_EXCEEDED"
     | "TIMEOUT"
+    | "CANCELLED"
     | "WASM_RUNTIME"
     | "EXCEL_ROUTE_DISABLED"
     | "VALIDATION_FAILED";

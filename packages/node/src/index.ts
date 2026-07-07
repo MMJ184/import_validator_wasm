@@ -1,24 +1,35 @@
 /**
  * @import-validator/node
  *
- * Server-side CSV validation for Node.js 20+.
+ * Server-side CSV + Excel (XLSX) validation for Node.js 20+.
  * Runs the WASM engine directly on the main thread — no Web Worker needed.
  *
  * Quick start:
- *   import { validateFile, validateBuffer, init } from "@import-validator/node";
+ *   import { validateFile, validateBuffer, validateXlsxFile, init } from "@import-validator/node";
  *
  *   const schema = { hasHeaders: true, columns: [...] };
- *   const result = await validateFile("data.csv", schema);
+ *   const result = await validateFile("data.csv", schema);       // CSV
+ *   const excel  = await validateXlsxFile("data.xlsx", schema);  // Excel
  *   if (!result.valid) console.log(result.errors);
  */
 
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
+import { Readable } from "node:stream";
+import { createInflateRaw } from "node:zlib";
 import {
-    initWasm,
-    Engine,
-    validateCsv,
+    bytesSource,
     chooseChunkSizeSmart,
+    Engine,
+    entryByteStream,
+    initWasm,
+    parseZipEntries,
+    pickFirstWorksheet,
+    validateCsv,
+    XLSX_LIMITS,
+    type InflateRaw,
+    type Progress,
+    type RandomAccessSource,
 } from "@import-validator/core";
 
 // Re-export useful types and the low-level Engine for advanced users.
@@ -55,7 +66,7 @@ export interface ValidationResult {
     errors: import("@import-validator/core").DecodedError[];
     /** Schema column names in schema order. */
     schemaColumns: string[];
-    /** Input CSV header names (empty when hasHeaders: false). */
+    /** Input header names (empty when hasHeaders: false). */
     inputColumns: string[];
     /** Normalised CSV bytes (only when emitNormalized: true). */
     normalized?: Uint8Array;
@@ -91,7 +102,7 @@ async function ensureInit(wasmUrl?: string | URL) {
     else await _initPromise;
 }
 
-// ── Core validation runner ────────────────────────────────────────────────────
+// ── Core CSV validation runner ────────────────────────────────────────────────
 
 async function run(
     source: AsyncIterable<Uint8Array>,
@@ -121,7 +132,7 @@ async function run(
     };
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
+// ── Public API: CSV ───────────────────────────────────────────────────────────
 
 /**
  * Validate a CSV file on disk.
@@ -200,4 +211,192 @@ export async function validateStream(
     opts: NodeValidateOptions = {}
 ): Promise<ValidationResult> {
     return run(stream, schema, opts);
+}
+
+// ── Public API: Excel (XLSX) ──────────────────────────────────────────────────
+
+/**
+ * Validate an .xlsx file on disk. The first worksheet is validated against
+ * the same schema contract as CSV — identical error codes, normalized
+ * output, and modifiers.
+ *
+ * The ZIP directory is read with random access and the worksheet streams
+ * through zlib inflate into the engine — the decompressed sheet XML is never
+ * held in memory.
+ *
+ * @example
+ * const result = await validateXlsxFile("uploads/data.xlsx", schema);
+ */
+export async function validateXlsxFile(
+    filePath: string,
+    schema: object,
+    opts: NodeValidateOptions = {}
+): Promise<ValidationResult> {
+    const fh = await open(filePath, "r");
+    try {
+        const size = (await fh.stat()).size;
+        const source: RandomAccessSource = {
+            size,
+            readRange: async (start, end) => {
+                const len = Math.max(0, end - start);
+                if (len === 0) return new Uint8Array();
+                const buf = Buffer.alloc(len);
+                const { bytesRead } = await fh.read(buf, 0, len, start);
+                return new Uint8Array(buf.buffer, buf.byteOffset, bytesRead);
+            },
+            streamRange: (start, end) => {
+                if (end <= start) return emptyIterable();
+                return fh.createReadStream({
+                    start,
+                    end: end - 1, // inclusive
+                    autoClose: false,
+                }) as AsyncIterable<Uint8Array>;
+            },
+        };
+        return await runXlsx(source, schema, opts);
+    } finally {
+        await fh.close();
+    }
+}
+
+/**
+ * Validate an .xlsx workbook already loaded into a Buffer or Uint8Array.
+ *
+ * @example
+ * const buf = await fs.promises.readFile("data.xlsx");
+ * const result = await validateXlsxBuffer(buf, schema);
+ */
+export async function validateXlsxBuffer(
+    data: Buffer | Uint8Array,
+    schema: object,
+    opts: NodeValidateOptions = {}
+): Promise<ValidationResult> {
+    const bytes =
+        Buffer.isBuffer(data)
+            ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+            : data;
+    return runXlsx(bytesSource(bytes), schema, opts);
+}
+
+/**
+ * Validate an .xlsx workbook arriving as a byte stream. ZIP containers need
+ * random access (the directory lives at the END of the file), so the stream
+ * is buffered fully first — prefer validateXlsxFile for large uploads.
+ */
+export async function validateXlsxStream(
+    stream: AsyncIterable<Uint8Array>,
+    schema: object,
+    opts: NodeValidateOptions = {}
+): Promise<ValidationResult> {
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    for await (const chunk of stream) {
+        parts.push(chunk);
+        total += chunk.length;
+    }
+    const bytes = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+        bytes.set(p, off);
+        off += p.length;
+    }
+    return validateXlsxBuffer(bytes, schema, opts);
+}
+
+async function runXlsx(
+    source: RandomAccessSource,
+    schema: object,
+    opts: NodeValidateOptions
+): Promise<ValidationResult> {
+    const { maxErrors = 10_000, emitNormalized = false, wasmUrl, signal, onProgress } = opts;
+    await ensureInit(wasmUrl);
+
+    const entries = await parseZipEntries(source);
+    const sheetName = pickFirstWorksheet(entries);
+    if (!sheetName) {
+        throw new Error("Invalid XLSX: no worksheet XML found in xl/worksheets/");
+    }
+    const sheetEntry = entries.get(sheetName)!;
+    if (sheetEntry.uncompressedSize > XLSX_LIMITS.maxSheetXmlUncompressedBytes) {
+        throw new Error(
+            `XLSX worksheet XML is too large (${sheetEntry.uncompressedSize} bytes). Limit is ${XLSX_LIMITS.maxSheetXmlUncompressedBytes} bytes.`
+        );
+    }
+    const sharedEntry = entries.get("xl/sharedStrings.xml");
+    if (sharedEntry && sharedEntry.uncompressedSize > XLSX_LIMITS.maxSharedStringsUncompressedBytes) {
+        throw new Error(
+            `XLSX shared strings XML is too large (${sharedEntry.uncompressedSize} bytes). Limit is ${XLSX_LIMITS.maxSharedStringsUncompressedBytes} bytes.`
+        );
+    }
+
+    const engine = await Engine.create(schema, maxErrors, emitNormalized);
+
+    if (sharedEntry) {
+        for await (const chunk of entryByteStream(source, sharedEntry, inflateRawNode)) {
+            throwIfAborted(signal);
+            engine.pushSharedStringsChunk(chunk, false);
+        }
+        engine.pushSharedStringsChunk(new Uint8Array(0), true);
+    }
+
+    const errors: import("@import-validator/core").DecodedError[] = [];
+    const normalizedParts: Uint8Array[] = [];
+    const totals: Progress = { rowsProcessed: 0, errorsAdded: 0, done: false };
+
+    const drain = () => {
+        errors.push(...engine.takeErrorsDecoded(5_000));
+        if (emitNormalized) {
+            const chunk = engine.takeNormalized();
+            if (chunk.length) normalizedParts.push(chunk);
+        }
+    };
+
+    for await (const chunk of entryByteStream(source, sheetEntry, inflateRawNode)) {
+        throwIfAborted(signal);
+        const progress = engine.pushSheetChunk(chunk, false);
+        totals.rowsProcessed += progress.rowsProcessed;
+        totals.errorsAdded += progress.errorsAdded;
+        onProgress?.({ rowsProcessed: totals.rowsProcessed, errorsAdded: totals.errorsAdded });
+        drain();
+    }
+    throwIfAborted(signal);
+    const final = engine.pushSheetChunk(new Uint8Array(0), true);
+    totals.rowsProcessed += final.rowsProcessed;
+    totals.errorsAdded += final.errorsAdded;
+    drain();
+    // drain any errors beyond the per-pass batch size
+    while (engine.errorsLen() > 0) drain();
+
+    return {
+        errors,
+        schemaColumns: engine.schemaColumns(),
+        inputColumns: engine.inputColumns(),
+        normalized: normalizedParts.length ? concat(normalizedParts) : undefined,
+        rowsProcessed: totals.rowsProcessed,
+        valid: errors.length === 0,
+    };
+}
+
+/** Node inflate adapter for the shared ZIP reader (raw DEFLATE via zlib). */
+const inflateRawNode: InflateRaw = (compressed) => {
+    const inflate = createInflateRaw();
+    return Readable.from(compressed).pipe(inflate) as AsyncIterable<Uint8Array>;
+};
+
+async function* emptyIterable(): AsyncIterable<Uint8Array> {}
+
+function concat(parts: Uint8Array[]): Uint8Array {
+    let total = 0;
+    for (const p of parts) total += p.length;
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+        out.set(p, off);
+        off += p.length;
+    }
+    return out;
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+    if (signal?.aborted) throw new Error("Validation aborted");
 }

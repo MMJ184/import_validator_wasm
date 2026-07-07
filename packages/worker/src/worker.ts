@@ -1,15 +1,23 @@
 import { chooseChunkSizeSmart } from "@import-validator/core";
-import { createEngine } from "./loaders/wasmLoader";
+import { createEngine, engineVersion } from "./loaders/wasmLoader";
 import { formatFatalMessage, toFatalError, WorkerValidationError } from "./errorTaxonomy";
 import { assertSupportedSchemaVersion, deriveValidatePassFlags } from "./flow";
 import { estimateCsv, type CsvEstimate } from "./pipeline/estimateCsv";
 import { runCsv } from "./pipeline/csvPipeline";
-import { estimateXlsx, runXlsx, type XlsxEstimate } from "./pipeline/xlsxPipeline";
-import type {
-    WorkerRequest,
-    WorkerResponse,
-    WorkerValidate,
-    WorkerValidateOptions,
+import {
+    estimateXlsx,
+    openXlsxSource,
+    runXlsx,
+    type OpenedXlsx,
+    type XlsxEstimate,
+} from "./pipeline/xlsxPipeline";
+import {
+    WORKER_PROTOCOL_VERSION,
+    type PostFn,
+    type WorkerRequest,
+    type WorkerResponse,
+    type WorkerValidate,
+    type WorkerValidateOptions,
 } from "./protocol";
 
 type WorkerInitState = {
@@ -19,6 +27,8 @@ type WorkerInitState = {
     defaultEmitNormalized: boolean;
     schemaDelimiter?: number | string;
     schemaHasHeaders: boolean;
+    /** Protocol version negotiated with the client (1 = legacy decoded errors). */
+    clientProtocolVersion: number;
 };
 
 type CachedEngine = {
@@ -30,10 +40,21 @@ type CachedEngine = {
 let initState: WorkerInitState | null = null;
 let cachedEngine: CachedEngine | null = null;
 let operationQueue: Promise<void> = Promise.resolve();
+/** Abort controller for the operation currently running (validate/estimate). */
+let currentOperation: AbortController | null = null;
 
 self.onmessage = (e: MessageEvent<WorkerRequest>) => {
     const req = e.data;
-    const post = (m: WorkerResponse) => self.postMessage(m);
+    const post: PostFn = (m: WorkerResponse, transfer?: Transferable[]) =>
+        (self as unknown as Worker).postMessage(m, transfer ?? []);
+
+    // Cancel is handled immediately, NOT queued — it must reach a running
+    // operation, not wait behind it.
+    if (req.type === "cancel") {
+        currentOperation?.abort("cancel");
+        return;
+    }
+
     enqueue(req, post, async () => {
         if (req.type === "init") {
             await handleInit(req, post);
@@ -52,7 +73,7 @@ self.onmessage = (e: MessageEvent<WorkerRequest>) => {
 
 function enqueue(
     req: WorkerRequest,
-    post: (m: WorkerResponse) => void,
+    post: PostFn,
     task: () => Promise<void>
 ) {
     operationQueue = operationQueue
@@ -65,7 +86,7 @@ function enqueue(
 
 async function handleInit(
     req: Extract<WorkerRequest, { type: "init" }>,
-    post: (m: WorkerResponse) => void
+    post: PostFn
 ) {
     assertSupportedSchemaVersion(req.schemaVersion);
     if (!req.wasmUrl) {
@@ -89,18 +110,24 @@ async function handleInit(
         defaultEmitNormalized: req.emitNormalized,
         schemaDelimiter: extractSchemaDelimiter(req.schema),
         schemaHasHeaders: extractSchemaHasHeaders(req.schema),
+        clientProtocolVersion: Math.min(req.protocolVersion ?? 1, WORKER_PROTOCOL_VERSION),
     };
 
     // Cache the warmup engine so the first validate call reuses it instead of
     // allocating a second engine immediately after init.
     cachedEngine = { engine: warmupEngine, maxErrors: req.maxErrors, emitNormalized: req.emitNormalized };
 
-    post({ type: "ready", columns: warmupEngine.schemaColumns() });
+    post({
+        type: "ready",
+        columns: warmupEngine.schemaColumns(),
+        protocolVersion: initState.clientProtocolVersion,
+        engineVersion: await engineVersion(),
+    });
 }
 
 async function handleValidate(
     req: WorkerValidate,
-    post: (m: WorkerResponse) => void
+    post: PostFn
 ) {
     if (!initState) {
         throw new WorkerValidationError("ENGINE_NOT_INITIALIZED", "Engine not initialized");
@@ -127,7 +154,7 @@ async function handleValidate(
     );
     const flags = deriveValidatePassFlags(req.options);
 
-    const result = await runWithTimeout(
+    const result = await runCancellable(
         (signal) => validateWithSignal(
             req,
             post,
@@ -157,22 +184,25 @@ async function handleValidate(
 
 async function handleEstimate(
     req: Extract<WorkerRequest, { type: "estimate" }>,
-    post: (m: WorkerResponse) => void
+    post: PostFn
 ) {
     const format = req.format ?? "csv";
     const estimateChunkSize = resolveChunkSize(req.file.size, req.chunkSize, "estimate");
-    const out = format === "excel"
-        ? await estimateXlsx(req.file)
-        : await estimateCsv(req.file, estimateChunkSize, {
-            delimiter: initState?.schemaDelimiter,
-            hasHeaders: initState?.schemaHasHeaders ?? true
-        });
+    const out = await runCancellable(async (signal) => {
+        return format === "excel"
+            ? await estimateXlsx(req.file, { signal })
+            : await estimateCsv(req.file, estimateChunkSize, {
+                delimiter: initState?.schemaDelimiter,
+                hasHeaders: initState?.schemaHasHeaders ?? true,
+                signal,
+            });
+    }, undefined);
     post({ type: "estimate", rows: out.rows, avgBytesPerRow: out.avgBytesPerRow, columns: out.columns });
 }
 
 async function validateWithSignal(
     req: WorkerValidate,
-    post: (m: WorkerResponse) => void,
+    post: PostFn,
     state: WorkerInitState,
     format: "csv" | "excel",
     shouldEmitEstimate: boolean,
@@ -182,7 +212,13 @@ async function validateWithSignal(
     estimateChunkSize: number,
     signal?: AbortSignal
 ): Promise<{ rowsProcessed: number; errorsPosted: number; dryRun: boolean }> {
+    const postPackedErrors = state.clientProtocolVersion >= 2;
+
     if (format === "excel") {
+        // Parse the ZIP container once; the estimate preflight and the
+        // validation run share it (the sheet used to be inflated twice).
+        const opened = await openXlsxSource(req.file);
+
         const needsExcelEstimate =
             shouldEmitEstimate ||
             !!req.options.maxRowsEstimate ||
@@ -194,6 +230,7 @@ async function validateWithSignal(
             post,
             shouldEmitEstimate,
             needsExcelEstimate,
+            opened,
             signal
         );
 
@@ -216,7 +253,8 @@ async function validateWithSignal(
             chunkSize: validateChunkSize,
             dryRunRows: req.options.dryRunRows,
             signal,
-        });
+            postPackedErrors,
+        }, opened);
         return { ...out, dryRun: false };
     }
 
@@ -250,6 +288,7 @@ async function validateWithSignal(
         chunkSize: validateChunkSize,
         dryRunRows: req.options.dryRunRows,
         signal,
+        postPackedErrors,
     });
     return { ...out, dryRun: false };
 }
@@ -257,7 +296,7 @@ async function validateWithSignal(
 async function runCsvPreflight(
     file: File,
     options: WorkerValidateOptions,
-    post: (m: WorkerResponse) => void,
+    post: PostFn,
     shouldEmitEstimate: boolean,
     needsEstimate: boolean,
     estimateChunkSize: number,
@@ -286,9 +325,10 @@ async function runCsvPreflight(
 async function runExcelPreflight(
     file: File,
     options: WorkerValidateOptions,
-    post: (m: WorkerResponse) => void,
+    post: PostFn,
     shouldEmitEstimate: boolean,
     needsEstimate: boolean,
+    opened: OpenedXlsx,
     signal?: AbortSignal
 ): Promise<XlsxEstimate | undefined> {
     if (!needsEstimate) {
@@ -298,6 +338,7 @@ async function runExcelPreflight(
     const estimate = await estimateXlsx(file, {
         signal,
         preferDimension: !options.maxRowsEstimate && !options.maxColumns,
+        opened,
     });
     enforceEstimateLimits(options, estimate);
 
@@ -338,28 +379,35 @@ function resolveChunkSize(
     return baseChunk;
 }
 
-async function runWithTimeout<T>(
+/**
+ * Run an operation with cancel support (worker "cancel" message) and an
+ * optional timeout. Both abort the same signal; the abort reason
+ * distinguishes TIMEOUT from CANCELLED in the fatal taxonomy.
+ */
+async function runCancellable<T>(
     fn: (signal?: AbortSignal) => Promise<T>,
     timeoutMs?: number
 ): Promise<T> {
-    if (!timeoutMs || timeoutMs <= 0) {
-        return await fn(undefined);
-    }
-
     const controller = new AbortController();
-    const timer = setTimeout(() => {
-        controller.abort();
-    }, timeoutMs);
+    currentOperation = controller;
+    const timer =
+        timeoutMs && timeoutMs > 0
+            ? setTimeout(() => controller.abort("timeout"), timeoutMs)
+            : null;
 
     try {
         return await fn(controller.signal);
     } catch (err) {
         if (controller.signal.aborted) {
+            if (controller.signal.reason === "cancel") {
+                throw new WorkerValidationError("CANCELLED", "Validation cancelled by client.", { retryable: true });
+            }
             throw new WorkerValidationError("TIMEOUT", `Validation timeout after ${timeoutMs} ms`, { retryable: true });
         }
         throw err;
     } finally {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
+        if (currentOperation === controller) currentOperation = null;
     }
 }
 
@@ -393,7 +441,7 @@ function extractSchemaHasHeaders(schema: object): boolean {
 }
 
 function postMetrics(
-    post: (m: WorkerResponse) => void,
+    post: PostFn,
     data: {
         format: "csv" | "excel";
         startedAtMs: number;

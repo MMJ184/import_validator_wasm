@@ -65,6 +65,7 @@ export function inferFatalCode(message: string): FatalErrorCode {
     if (text.includes("decompressed size exceeds safe limit")) return "FILE_TOO_LARGE";
     if (text.includes("maxrowsestimate")) return "ROWS_LIMIT_EXCEEDED";
     if (text.includes("maxcolumns")) return "COLUMNS_LIMIT_EXCEEDED";
+    if (text.includes("cancelled by client")) return "CANCELLED";
     if (text.includes("timeout")) return "TIMEOUT";
     if (text.includes("excel validation is routed separately")) return "EXCEL_ROUTE_DISABLED";
     if (
@@ -135,11 +136,11 @@ function requestFormat(req: WorkerRequest): FatalErrorDetails["format"] | undefi
 }
 
 function requestFileName(req: WorkerRequest): string | undefined {
-    if (req.type === "init") return undefined;
+    if (req.type !== "validate" && req.type !== "estimate") return undefined;
     return req.file?.name;
 }
 
 function requestFileSize(req: WorkerRequest): number | undefined {
-    if (req.type === "init") return undefined;
+    if (req.type !== "validate" && req.type !== "estimate") return undefined;
     return req.file?.size;
 }

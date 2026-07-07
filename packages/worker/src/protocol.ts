@@ -1,5 +1,13 @@
 import type { DecodedError, Progress } from "@import-validator/core";
 
+/**
+ * Worker protocol version. v2 adds packed-error transfer ("errorsPacked"
+ * messages, decoded in the SDK) and the "cancel" request. A v1 client (older
+ * SDK) that omits protocolVersion in init keeps receiving decoded "errors"
+ * messages — new worker, old SDK stays compatible.
+ */
+export const WORKER_PROTOCOL_VERSION = 2;
+
 export type FatalErrorCode =
     | "SCHEMA_VERSION_UNSUPPORTED"
     | "WASM_URL_REQUIRED"
@@ -8,6 +16,7 @@ export type FatalErrorCode =
     | "ROWS_LIMIT_EXCEEDED"
     | "COLUMNS_LIMIT_EXCEEDED"
     | "TIMEOUT"
+    | "CANCELLED"
     | "WASM_RUNTIME"
     | "EXCEL_ROUTE_DISABLED"
     | "VALIDATION_FAILED";
@@ -52,6 +61,8 @@ export type WorkerInit = {
     schemaVersion?: number;
     maxErrors: number;
     emitNormalized: boolean;
+    /** Highest protocol version the client understands (default 1). */
+    protocolVersion?: number;
 };
 
 export type WorkerValidate = {
@@ -67,10 +78,15 @@ export type WorkerEstimate = {
     format?: "csv" | "excel";
 };
 
-export type WorkerRequest = WorkerInit | WorkerValidate | WorkerEstimate;
+/** Abort the currently running validate/estimate operation. */
+export type WorkerCancel = {
+    type: "cancel";
+};
+
+export type WorkerRequest = WorkerInit | WorkerValidate | WorkerEstimate | WorkerCancel;
 
 export type WorkerResponse =
-    | { type: "ready"; columns: string[] }
+    | { type: "ready"; columns: string[]; protocolVersion?: number; engineVersion?: string }
     | { type: "estimate"; rows: number; avgBytesPerRow: number; columns?: number }
     | { type: "metrics"; metrics: {
         format: "csv" | "excel";
@@ -85,6 +101,15 @@ export type WorkerResponse =
     } }
     | { type: "progress"; progress: Progress }
     | { type: "errors"; errors: DecodedError[] }
+    /**
+     * v2: packed errors (2 u32 words per error, transferable buffer) plus the
+     * column tables needed to decode them. Decoded by the SDK into the same
+     * DecodedError[] shape apps already consume.
+     */
+    | { type: "errorsPacked"; packed: Uint32Array; schemaColumns: string[]; inputColumns: string[] }
     | { type: "normalized"; chunk: Uint8Array }
     | { type: "done" }
     | { type: "fatal"; message: string; error: FatalErrorDetails };
+
+/** postMessage sink with optional transfer list (zero-copy for big buffers). */
+export type PostFn = (msg: WorkerResponse, transfer?: Transferable[]) => void;
