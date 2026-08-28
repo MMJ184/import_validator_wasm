@@ -28,7 +28,7 @@ Passed as the first argument to `createValidator()`. Set once per validator inst
 | `wasmUrl` | `string \| URL` | ✅ | URL to the hosted `.wasm` file |
 | `workerUrl` | `string \| URL` | ✅* | URL to the hosted worker JS file |
 | `workerFactory` | `() => Worker` | ✅* | Alternative: provide a Worker constructor |
-| `maxErrors` | `number` | — | Max errors the engine stores (default: auto by file size) |
+| `maxErrors` | `number` | — | Max errors the engine stores at once (default: auto by file size). Caps what is *kept*, never which rows are validated; the overflow count arrives as `onDone(errorsSuppressed)` |
 | `emitNormalized` | `boolean` | — | Emit normalized CSV output (default: auto by file size) |
 | `profile` | `"fast" \| "balanced" \| "strict"` | — | Default runtime profile (default: `"balanced"`) |
 | `schemaVersion` | `number` | — | Schema contract version (default: `1`) |
@@ -70,7 +70,10 @@ Fired periodically during validation.
 ```ts
 type Progress = {
   rowsProcessed: number;  // rows processed in this batch
-  errorsAdded: number;    // errors added in this batch
+  errorsAdded: number;    // errors FOUND in this batch — including any that did
+                          // not fit the engine queue, so summing these across
+                          // progress events gives the file's true error count,
+                          // not the number you will receive via onErrors
   done: boolean;          // true only on final flush
 };
 ```
@@ -118,9 +121,20 @@ type ValidationMetrics = {
 Fired with chunks of normalized CSV bytes. Only fires if `emitNormalized: true` was set. Reassemble with `concatChunks` (exported from `@import-validator/sdk`):
 `new TextDecoder().decode(concatChunks(parts))`.
 
-### `onDone()`
+### `onDone(errorsSuppressed?: number)`
 
 Fired when validation is complete (or when `estimateOnly: true` completes the estimate pass).
+
+`errorsSuppressed` is how many errors were found but **not delivered** — for any
+of three reasons: the engine's queue was at `maxErrors`, the error was filtered
+out by `maxErrorRowsToShow`, or it was still queued when `maxPostErrorsTotal`
+was reached. Every row is always validated, so the errors you received plus this
+number is the exact count of problems in the file — use it to render
+"showing 2,000 of 47,331".
+
+Two caveats: with `dryRunRows` the total covers only the rows actually
+validated, not the whole file; and an `estimateOnly` run reports `0`, since
+nothing was validated. It is `undefined` when the worker predates this field.
 
 ### `onFatal(message: string, fatal?: ValidationFatal)`
 
@@ -212,7 +226,7 @@ createValidator({ workerUrl: defaultWorkerUrl, wasmUrl: defaultWasmUrl, ... });
 For a successful validation with estimate:
 
 ```
-onReady → onEstimate → onProgress (×N) → onErrors (×N) → onMetrics → onDone
+onReady → onEstimate → onProgress (×N) → onErrors (×N) → onDone → onMetrics
 ```
 
 For a fatal error:

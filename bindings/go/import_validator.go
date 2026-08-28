@@ -27,7 +27,7 @@ package importvalidator
 
 /*
 #cgo LDFLAGS: -limport_validator
-#include "../../include/import_validator.h"
+#include "../include/import_validator.h"
 #include <stdlib.h>
 */
 import "C"
@@ -73,6 +73,10 @@ type ValidationResult struct {
 	InputColumns  []string
 	Normalized    []byte // populated when emitNormalized=true
 	Valid         bool
+	// ErrorsSuppressed counts errors found but not recorded because maxErrors
+	// was already reached. Every row is always read and validated, so
+	// len(Errors) + ErrorsSuppressed is the exact number of problems in the file.
+	ErrorsSuppressed uint64
 }
 
 // Engine is a streaming CSV/XLSX validation engine.
@@ -89,7 +93,9 @@ type Engine struct {
 // NewEngine creates a new validation engine from a JSON schema string.
 //
 //	schemaJSON     — JSON matching the schema contract (docs/validation-config.schema.json).
-//	maxErrors      — stop collecting errors after this many.
+//	maxErrors      — stop RECORDING errors after this many. Every row is still
+//	                 read, counted and validated; extra errors are tallied in
+//	                 ErrorsSuppressed.
 //	emitNormalized — set true to collect normalised CSV bytes.
 func NewEngine(schemaJSON string, maxErrors uint32, emitNormalized bool) (*Engine, error) {
 	schema := C.CString(schemaJSON)
@@ -251,6 +257,14 @@ func (e *Engine) ErrorsCount() uint32 {
 	return uint32(C.iv_engine_errors_count(e.handle))
 }
 
+// ErrorsSuppressed returns how many errors were found but not queued because
+// the queue was already at maxErrors. maxErrors caps how many errors are
+// recorded, never which rows are read or validated, so drained errors plus
+// this is the exact number of problems in the file.
+func (e *Engine) ErrorsSuppressed() uint64 {
+	return uint64(C.iv_engine_errors_suppressed(e.handle))
+}
+
 // TakeErrors drains up to maxPairs errors and returns decoded ValidationErrors.
 func (e *Engine) TakeErrors(maxPairs uint32) []ValidationError {
 	if maxPairs == 0 {
@@ -349,6 +363,7 @@ func ValidateBytes(csvBytes []byte, schemaJSON string, maxErrors uint32, emitNor
 	defer engine.Close()
 
 	const chunkSize = 256 * 1024
+	var normParts [][]byte
 	for off := 0; off < len(csvBytes); {
 		end := off + chunkSize
 		if end > len(csvBytes) {
@@ -358,6 +373,7 @@ func ValidateBytes(csvBytes []byte, schemaJSON string, maxErrors uint32, emitNor
 		if _, err := engine.PushChunk(csvBytes[off:end], final); err != nil {
 			return nil, err
 		}
+		normParts = drainNormalized(engine, emitNormalized, normParts)
 		off = end
 	}
 	if len(csvBytes) == 0 {
@@ -365,7 +381,7 @@ func ValidateBytes(csvBytes []byte, schemaJSON string, maxErrors uint32, emitNor
 			return nil, err
 		}
 	}
-	return collectResult(engine, maxErrors, emitNormalized), nil
+	return collectResult(engine, maxErrors, emitNormalized, normParts), nil
 }
 
 // ValidateReader validates CSV from any io.Reader.
@@ -381,6 +397,7 @@ func ValidateReader(r io.Reader, schemaJSON string, maxErrors uint32, emitNormal
 		chunkSize = 256 * 1024
 	}
 	buf := make([]byte, chunkSize)
+	var normParts [][]byte
 	for {
 		n, readErr := r.Read(buf)
 		final := readErr == io.EOF
@@ -393,6 +410,7 @@ func ValidateReader(r io.Reader, schemaJSON string, maxErrors uint32, emitNormal
 				return nil, pushErr
 			}
 		}
+		normParts = drainNormalized(engine, emitNormalized, normParts)
 		if readErr != nil {
 			if readErr == io.EOF {
 				break
@@ -400,7 +418,7 @@ func ValidateReader(r io.Reader, schemaJSON string, maxErrors uint32, emitNormal
 			return nil, readErr
 		}
 	}
-	return collectResult(engine, maxErrors, emitNormalized), nil
+	return collectResult(engine, maxErrors, emitNormalized, normParts), nil
 }
 
 // ValidateXlsxBytes validates a complete in-memory .xlsx workbook.
@@ -414,7 +432,7 @@ func ValidateXlsxBytes(xlsxBytes []byte, schemaJSON string, maxErrors uint32, em
 	if _, err := engine.ValidateXlsxBytes(xlsxBytes); err != nil {
 		return nil, err
 	}
-	return collectResult(engine, maxErrors, emitNormalized), nil
+	return collectResult(engine, maxErrors, emitNormalized, nil), nil
 }
 
 // ValidateXlsxFile validates an .xlsx file at the given path.
@@ -447,19 +465,83 @@ func progressFromC(prog *C.IvProgress) ChunkProgress {
 	}
 }
 
-func collectResult(engine *Engine, maxErrors uint32, emitNormalized bool) *ValidationResult {
-	errors := engine.TakeErrors(maxErrors)
-	var norm []byte
-	if emitNormalized {
-		norm = engine.TakeNormalized()
-	}
+// collectResult assembles the final result. normParts holds normalised bytes
+// already drained during streaming; anything the final flush emitted is picked
+// up here.
+func collectResult(engine *Engine, maxErrors uint32, emitNormalized bool, normParts [][]byte) *ValidationResult {
+	errors := drainAllErrors(engine, maxErrors)
+	normParts = drainNormalized(engine, emitNormalized, normParts)
+	suppressed := engine.ErrorsSuppressed()
 	return &ValidationResult{
 		Errors:        errors,
 		SchemaColumns: engine.SchemaColumns(),
 		InputColumns:  engine.InputColumns(),
-		Normalized:    norm,
-		Valid:         len(errors) == 0,
+		Normalized:    joinNormalized(normParts),
+		// Suppressed errors still make a file invalid: with maxErrors == 0
+		// nothing is drained, and reporting Valid here would be plainly wrong.
+		Valid:            len(errors) == 0 && suppressed == 0,
+		ErrorsSuppressed: suppressed,
 	}
+}
+
+// drainNormalized appends the normalised bytes accumulated so far to parts.
+// Draining after every chunk keeps the engine's native buffer small: it never
+// holds the whole normalised output, which halves peak memory and avoids one
+// large copy out of native memory at the end.
+func drainNormalized(engine *Engine, emitNormalized bool, parts [][]byte) [][]byte {
+	if !emitNormalized {
+		return parts
+	}
+	if part := engine.TakeNormalized(); len(part) > 0 {
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+// joinNormalized concatenates per-chunk normalised buffers into one slice.
+func joinNormalized(parts [][]byte) []byte {
+	switch len(parts) {
+	case 0:
+		return nil
+	case 1:
+		return parts[0]
+	}
+	total := 0
+	for _, p := range parts {
+		total += len(p)
+	}
+	out := make([]byte, 0, total)
+	for _, p := range parts {
+		out = append(out, p...)
+	}
+	return out
+}
+
+// drainAllErrors drains the error queue in bounded batches until it is empty,
+// so a large maxErrors does not force one oversized scratch buffer.
+// Errors are deliberately NOT drained per chunk. The engine always reads,
+// counts and validates every row — maxErrors only caps how many errors it
+// records — so draining mid-stream would free queue slots and let this binding
+// return more than maxErrors errors for one file. Draining only at the end
+// keeps maxErrors an effective per-file total; every error past it is counted
+// in ErrorsSuppressed rather than lost silently.
+func drainAllErrors(engine *Engine, maxErrors uint32) []ValidationError {
+	if maxErrors == 0 {
+		return nil
+	}
+	batch := uint32(4096)
+	if maxErrors < batch {
+		batch = maxErrors
+	}
+	out := make([]ValidationError, 0, batch)
+	for engine.ErrorsCount() > 0 {
+		got := engine.TakeErrors(batch)
+		if len(got) == 0 {
+			break
+		}
+		out = append(out, got...)
+	}
+	return out
 }
 
 // errBufMessage extracts the NUL-terminated message from a C error buffer.

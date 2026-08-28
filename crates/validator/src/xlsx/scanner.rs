@@ -101,8 +101,8 @@ impl Default for SheetScanner {
 
 impl SheetScanner {
     /// Feed a chunk of decompressed worksheet XML. Rows are validated as they
-    /// complete. Mirrors the CSV path on error-limit: the rest of the chunk
-    /// is skipped once the engine's error queue is full.
+    /// complete. Every row in the chunk is scanned regardless of the engine's
+    /// error queue — `max_errors` caps what is recorded, never what is read.
     pub fn push(
         &mut self,
         chunk: &[u8],
@@ -232,11 +232,6 @@ impl SheetScanner {
                             // the handler mutates self buffers — copy small
                             // tags is avoided by scoping the borrow.
                             self.handle_tag(&data[tag_start..tag_end], core)?;
-                            if core.hit_error_limit() {
-                                // CSV-path parity: abandon the rest of this
-                                // chunk; scanning resumes on the next push.
-                                return Ok(());
-                            }
                         }
                     }
                 }

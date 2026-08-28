@@ -15,7 +15,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCopyrightAttribute("Copyright (c) 2025-2026 Maulik Mangukiya. All rights reserved.")]
 [assembly: System.Reflection.AssemblyDescriptionAttribute("C# bindings for the ImportValidator native CSV/XLSX validation engine.")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("0.2.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.2.0+c4ff07396c622845d93ac57b21699a338e234018")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.2.0+00298477ae4c584c6374c3c32740156f386a9003")]
 [assembly: System.Reflection.AssemblyProductAttribute("ImportValidator")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ImportValidator")]
 [assembly: System.Reflection.AssemblyVersionAttribute("0.2.0.0")]

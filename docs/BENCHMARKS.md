@@ -6,7 +6,7 @@ Measured with `pnpm run bench` (median of 3 runs after warmup), schema with
 and a composite `uniqueGroups` key — a deliberately validation-heavy setup,
 not a parse-only best case.
 
-- Date: 2026-07-07
+- Date: 2026-08-28
 - Machine: Apple M3 Pro (arm64), Node v24.11.1
 - Engine: fast WASM tier (no regex), `opt-level=3`, LTO, `wasm-opt -O4`
 - Runtime: @import-validator/node (same engine the browser worker runs)
@@ -15,10 +15,10 @@ not a parse-only best case.
 
 | Scenario | File size | Median time | Throughput | Errors found |
 |---|---:|---:|---:|---:|
-| 100k rows, clean | 10.0 MB | 78 ms | 1,276,057 rows/s · 127.2 MB/s | 0 |
-| 100k rows, 5% dirty | 9.9 MB | 80 ms | 1,254,861 rows/s · 124.9 MB/s | 5,493 |
-| 1M rows, clean | 102.7 MB | 862 ms | 1,160,661 rows/s · 119.2 MB/s | 0 |
-| 1M rows, 5% dirty | 102.5 MB | 838 ms | 1,192,774 rows/s · 122.2 MB/s | 55,116 |
+| 100k rows, clean | 10.0 MB | 77 ms | 1,292,940 rows/s · 128.9 MB/s | 0 |
+| 100k rows, 5% dirty | 9.9 MB | 79 ms | 1,272,313 rows/s · 126.6 MB/s | 5,493 |
+| 1M rows, clean | 102.7 MB | 847 ms | 1,180,920 rows/s · 121.3 MB/s | 0 |
+| 1M rows, 5% dirty | 102.5 MB | 841 ms | 1,188,789 rows/s · 121.8 MB/s | 55,116 |
 
 ## Excel (XLSX) validation
 
@@ -29,16 +29,16 @@ the comparable number, not MB/s.
 
 | Scenario | File size (compressed) | Median time | Throughput | Errors found |
 |---|---:|---:|---:|---:|
-| 100k rows, clean (xlsx) | 6.5 MB | 290 ms | 345,087 rows/s · 22.4 MB/s | 0 |
-| 100k rows, 5% dirty (xlsx) | 6.5 MB | 278 ms | 360,244 rows/s · 23.5 MB/s | 5,493 |
-| 250k rows, clean (xlsx) | 16.3 MB | 696 ms | 359,107 rows/s · 23.4 MB/s | 0 |
+| 100k rows, clean (xlsx) | 6.5 MB | 238 ms | 420,513 rows/s · 27.3 MB/s | 0 |
+| 100k rows, 5% dirty (xlsx) | 6.5 MB | 240 ms | 416,734 rows/s · 27.2 MB/s | 5,493 |
+| 250k rows, clean (xlsx) | 16.3 MB | 621 ms | 402,396 rows/s · 26.3 MB/s | 0 |
 
 ## Auxiliary passes
 
 | Scenario | File size | Median time | Throughput | Errors found |
 |---|---:|---:|---:|---:|
-| 1M rows, estimate pass (csv) | 102.7 MB | 244 ms | 4,102,101 rows/s · 421.3 MB/s | 0 |
-| 1M rows, clean + normalized | 102.7 MB | 1,078 ms | 927,906 rows/s · 95.3 MB/s | 0 |
+| 1M rows, estimate pass (csv) | 102.7 MB | 241 ms | 4,154,835 rows/s · 426.7 MB/s | 0 |
+| 1M rows, clean + normalized | 102.7 MB | 1,091 ms | 916,702 rows/s · 94.1 MB/s | 0 |
 
 Browser numbers track these closely: the Web Worker runs the identical WASM
 binary; expect a few percent overhead from chunked File reads and message

@@ -108,7 +108,14 @@ export type WorkerResponse =
      */
     | { type: "errorsPacked"; packed: Uint32Array; schemaColumns: string[]; inputColumns: string[] }
     | { type: "normalized"; chunk: Uint8Array }
-    | { type: "done" }
+    /**
+     * `errorsSuppressed`: every error found but not delivered — capped by the
+     * engine's `maxErrors` queue, filtered out by `maxErrorRowsToShow`, or
+     * still queued when `maxPostErrorsTotal` was reached. Errors received plus
+     * this is the exact total for the rows that were validated, which is the
+     * whole file unless `dryRunRows` stopped it early.
+     */
+    | { type: "done"; errorsSuppressed?: number }
     | { type: "fatal"; message: string; error: FatalErrorDetails };
 
 /** postMessage sink with optional transfer list (zero-copy for big buffers). */

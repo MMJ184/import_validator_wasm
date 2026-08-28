@@ -1,5 +1,5 @@
 import { CsvRowCounter, isWasmReady } from "@import-validator/core";
-import { macrotaskTick, streamFile } from "./csvPipeline.js";
+import { createTickPacer, streamFile } from "./csvPipeline.js";
 
 export type CsvEstimate = {
     rows: number;
@@ -45,9 +45,10 @@ async function countRowsWasm(
     signal?: AbortSignal
 ): Promise<{ rows: number; firstRowColumns?: number }> {
     const counter = await CsvRowCounter.create(delimiter);
+    const maybeTick = createTickPacer();
     for await (const chunk of streamFile(file, chunkSize, signal)) {
         counter.push(chunk);
-        await macrotaskTick();
+        await maybeTick();
     }
     return counter.finish();
 }

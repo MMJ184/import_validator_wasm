@@ -141,6 +141,15 @@ int32_t iv_engine_push_sheet_chunk(
 uint32_t iv_engine_errors_count(IvEngine handle);
 
 /**
+ * Number of errors found but not queued because the queue was at max_errors.
+ *
+ * max_errors caps how many errors are kept, never which rows are read or
+ * validated, so drained errors plus this is the exact number of problems in
+ * the file. Use it to report "showing N of TOTAL".
+ */
+uint64_t iv_engine_errors_suppressed(IvEngine handle);
+
+/**
  * Drain up to max_pairs errors into out_buf.
  *
  * Each error = two consecutive uint32_t values:

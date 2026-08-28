@@ -79,6 +79,8 @@ They **must** be served from the same origin as your app (or with correct CORS h
 ```ts
 import { createValidator } from "@import-validator/sdk";
 
+let shownErrors = 0;
+
 const validator = createValidator(
   {
     schema: mySchema,                                        // your validation schema
@@ -95,13 +97,18 @@ const validator = createValidator(
       console.log(`Rows processed: ${p.rowsProcessed}, errors: ${p.errorsAdded}`);
     },
     onErrors: (errors) => {
+      shownErrors += errors.length;
       for (const e of errors) {
         // e.row, e.columnName, e.codeString, e.message
         console.warn(e.message);
       }
     },
-    onDone: () => {
-      console.log("Validation complete");
+    onDone: (errorsSuppressed = 0) => {
+      // Every row is always validated; maxErrors only caps how many errors are
+      // delivered, so add the suppressed count back for the true total.
+      console.log(
+        `Validation complete — showing ${shownErrors} of ${shownErrors + errorsSuppressed}`
+      );
       validator.terminate(); // release the worker
     },
     onFatal: (message, fatal) => {

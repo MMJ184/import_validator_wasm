@@ -64,7 +64,10 @@ export async function runEngineStream(
     opts: CsvRunOptions,
     push: (engine: Engine, chunk: Uint8Array, final: boolean) => Progress
 ): Promise<{ rowsProcessed: number; errorsPosted: number }> {
-    const emitNormalized = opts.emitNormalized ?? false;
+    // The engine is the authority: if it accumulates normalized output we must
+    // drain it even when the caller says otherwise, or the buffer grows for the
+    // whole file. An explicit `false` must not win over the engine's own state.
+    const emitNormalized = opts.emitNormalized === true || engine.emitNormalized === true;
     const postErrorBatch = opts.postErrorBatch ?? DEFAULT_POST_ERROR_BATCH;
     const maxPostErrorsTotal = opts.maxPostErrorsTotal ?? DEFAULT_MAX_POST_ERRORS_TOTAL;
     const maxErrorRowsToShow =
@@ -79,8 +82,14 @@ export async function runEngineStream(
     );
     const signal = opts.signal;
     const postPacked = opts.postPackedErrors === true;
+    const maybeTick = createTickPacer();
 
     let totalPostedErrors = 0;
+    // Errors the *worker* found but never delivered: filtered out by
+    // maxErrorRowsToShow, or discarded once that row limit was reached. The
+    // engine's own suppressed count knows nothing about these, and the host is
+    // told that delivered + suppressed is the file's exact total.
+    let undelivered = 0;
     let totalRowsProcessed = 0;
     const shownRows = new Set<number>();
     let rowLimitReached = false;
@@ -108,7 +117,7 @@ export async function runEngineStream(
 
     const flushErrors = () => {
         if (rowLimitReached) {
-            drainErrorsDiscarding(engine);
+            undelivered += drainErrorsDiscarding(engine);
             return;
         }
         if (engine.errorsLen() === 0) return;
@@ -122,6 +131,7 @@ export async function runEngineStream(
                 const packed = engine.takeErrorsPacked(requestSize);
                 if (!packed.length) return;
                 const visible = filterPackedByRows(packed);
+                undelivered += (packed.length - visible.length) / 2;
                 if (visible.length) {
                     totalPostedErrors += visible.length / 2;
                     post(
@@ -150,6 +160,7 @@ export async function runEngineStream(
                             shownRows.add(e.row);
                             return true;
                         });
+                undelivered += batch.length - visibleBatch.length;
 
                 if (visibleBatch.length) {
                     totalPostedErrors += visibleBatch.length;
@@ -158,7 +169,7 @@ export async function runEngineStream(
             }
 
             if (rowLimitReached) {
-                drainErrorsDiscarding(engine);
+                undelivered += drainErrorsDiscarding(engine);
                 return;
             }
         }
@@ -188,8 +199,8 @@ export async function runEngineStream(
 
         // Keep timers (timeoutMs) and cancel messages live: with read-ahead,
         // every await may resolve from cache (microtasks only), which starves
-        // the worker's macrotask queue.
-        await macrotaskTick();
+        // the worker's macrotask queue. Paced by the clock, not by chunk count.
+        await maybeTick();
     }
 
     throwIfAborted(signal);
@@ -204,7 +215,18 @@ export async function runEngineStream(
     flushErrors();
     flushNormalized();
 
-    post({ type: "done" });
+    // Everything found but not delivered: capped by the engine queue, dropped
+    // by this worker, or still queued because maxPostErrorsTotal was reached.
+    // Tolerate an older core — worker and core ship as separate packages.
+    const engineSuppressed =
+        typeof engine.errorsSuppressed === "function" ? engine.errorsSuppressed() : undefined;
+    post({
+        type: "done",
+        errorsSuppressed:
+            engineSuppressed === undefined
+                ? undefined
+                : engineSuppressed + undelivered + engine.errorsLen(),
+    });
     return {
         rowsProcessed: totalRowsProcessed,
         errorsPosted: totalPostedErrors,
@@ -228,9 +250,11 @@ export async function runEngineStream(
     }
 }
 
-function drainErrorsDiscarding(engine: Engine) {
+/** Discard the queue without materializing it. Returns how many were dropped. */
+function drainErrorsDiscarding(engine: Engine): number {
     const count = engine.errorsLen();
     if (count > 0) engine.dropErrors(count);
+    return count;
 }
 
 function pushChunkSafe(
@@ -299,19 +323,71 @@ export function macrotaskTick(): Promise<void> {
     if (!tickChannel) {
         tickChannel = new MessageChannel();
         tickChannel.port1.onmessage = () => {
+            // Idle again: stop holding the loop open (no-op in browsers).
+            (tickChannel!.port1 as any).unref?.();
             const r = tickResolve;
             tickResolve = null;
             r?.();
         };
-        // Node: open ports keep the event loop alive; unref so test runners
-        // and CLIs can exit. No-op in browsers/workers.
+        // Node: open ports keep the event loop alive, which would stop test
+        // runners and CLIs exiting. No-op in browsers/workers.
         (tickChannel.port1 as any).unref?.();
         (tickChannel.port2 as any).unref?.();
     }
     return new Promise((resolve) => {
         tickResolve = resolve;
+        // Hold the loop open only while this tick is in flight. Unref'd
+        // throughout, a Node host with no other pending handle treats the loop
+        // as drained and the awaited tick never settles.
+        (tickChannel!.port1 as any).ref?.();
         tickChannel!.port2.postMessage(0);
     });
+}
+
+/** Max time between macrotask yields — one frame, so cancel stays responsive. */
+const TICK_INTERVAL_MS = 16;
+/**
+ * Every Nth yield goes through `setTimeout` instead of the MessageChannel.
+ *
+ * A port message is cheaper, but under Node it is delivered without draining
+ * the timer phase — so `timeoutMs`, which is a `setTimeout` in the worker,
+ * never fires while a validation loop is spinning on port yields. (`cancel()`
+ * is unaffected: it arrives as a port message like the tick itself.) One timer
+ * yield per ~64 ms restores that without paying setTimeout's clamp each frame.
+ */
+const TIMER_YIELD_EVERY = 4;
+
+/** Yield in a way that lets due timers run. */
+function timerTick(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Yield a macrotask at most every `TICK_INTERVAL_MS`, instead of once per chunk.
+ *
+ * Responsiveness only requires yielding often enough for a human, but chunk
+ * count is set by the reader/inflater: a low-memory device (256 KB CSV chunks)
+ * or a worksheet inflated in ~16 KB units produces thousands of chunks, so
+ * ticking per chunk spends real time in the scheduler for no benefit. Pacing by
+ * the clock keeps the 16 ms guarantee whatever the chunk size.
+ *
+ * Uses `performance.now()`: it is monotonic, so a backward system-clock step
+ * cannot stall yielding the way `Date.now()` would.
+ */
+export function createTickPacer(intervalMs = TICK_INTERVAL_MS) {
+    let lastTickAt = performance.now();
+    let sinceTimerYield = 0;
+    return async function maybeTick(): Promise<void> {
+        const now = performance.now();
+        if (now - lastTickAt < intervalMs) return;
+        lastTickAt = now;
+        if (++sinceTimerYield >= TIMER_YIELD_EVERY) {
+            sinceTimerYield = 0;
+            await timerTick();
+            return;
+        }
+        await macrotaskTick();
+    };
 }
 
 function throwIfAborted(signal?: AbortSignal) {

@@ -1,5 +1,7 @@
 import {
     blobSource,
+    DEFAULT_PUSH_CHUNK_BYTES,
+    rechunk,
     entryByteStream,
     isWasmReady,
     iterateStream,
@@ -13,7 +15,7 @@ import {
     type ZipEntryMeta,
 } from "@import-validator/core";
 import type { PostFn } from "../protocol";
-import { macrotaskTick, runEngineStream, type CsvRunOptions } from "./csvPipeline.js";
+import { createTickPacer, runEngineStream, type CsvRunOptions } from "./csvPipeline.js";
 
 export type XlsxEstimate = {
     rows: number;
@@ -83,10 +85,15 @@ export async function estimateXlsx(
         );
     }
     const counter = await XlsxSheetRowCounter.create();
-    for await (const chunk of entryByteStream(opened.source, opened.sheetEntry, inflateRawStream)) {
+    const countChunks = rechunk(
+        entryByteStream(opened.source, opened.sheetEntry, inflateRawStream),
+        DEFAULT_PUSH_CHUNK_BYTES
+    );
+    const maybeTick = createTickPacer();
+    for await (const chunk of countChunks) {
         throwIfAborted(signal);
         counter.push(chunk);
-        await macrotaskTick();
+        await maybeTick();
     }
     const { rows, columns } = counter.finish();
 
@@ -105,19 +112,30 @@ export async function runXlsx(
     const src = opened ?? (await openXlsxSource(file));
     const signal = opts.signal;
 
+    // Push size is deliberately not the caller's chunkSize: see rechunk.
+    const pushChunkBytes = DEFAULT_PUSH_CHUNK_BYTES;
+
     // Shared strings must be fully loaded before sheet rows. When the entry
     // exists we always load it (cheap relative to the sheet; inline-only
     // sheets that still carry a sharedStrings part are rare).
     if (src.sharedEntry) {
-        for await (const chunk of entryByteStream(src.source, src.sharedEntry, inflateRawStream)) {
+        const sharedChunks = rechunk(
+            entryByteStream(src.source, src.sharedEntry, inflateRawStream),
+            pushChunkBytes
+        );
+        const maybeTick = createTickPacer();
+        for await (const chunk of sharedChunks) {
             throwIfAborted(signal);
             engine.pushSharedStringsChunk(chunk, false);
-            await macrotaskTick();
+            await maybeTick();
         }
         engine.pushSharedStringsChunk(EMPTY, true);
     }
 
-    const sheetChunks = entryByteStream(src.source, src.sheetEntry, inflateRawStream);
+    const sheetChunks = rechunk(
+        entryByteStream(src.source, src.sheetEntry, inflateRawStream),
+        pushChunkBytes
+    );
     return await runEngineStream(sheetChunks, engine, post, opts, (eng, chunk, final) =>
         eng.pushSheetChunk(chunk, final)
     );

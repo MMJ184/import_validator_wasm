@@ -34,7 +34,11 @@ for chunk in read_chunks(&mut file)? {
 }
 let summary = v.finish().map_err(|e| anyhow::anyhow!(e))?;
 
-println!("rows: {}, valid: {}", summary.rows_processed, v.errors_count() == 0);
+// errors_count() is the live queue length; errors_suppressed() counts what did
+// not fit. `max_errors` caps recording only — every row is always validated —
+// so both must be zero for the file to be clean.
+let valid = v.errors_count() == 0 && v.errors_suppressed() == 0;
+println!("rows: {}, valid: {valid}", summary.rows_processed);
 for err in v.take_errors(10_000) {
     // err.row, err.column_index, err.column_kind, err.column_name,
     // err.code, err.code_name — Display prints a readable line

@@ -158,6 +158,9 @@ def _configure_signatures(lib: ctypes.CDLL) -> None:
     lib.iv_engine_errors_count.argtypes = [ctypes.c_void_p]
     lib.iv_engine_errors_count.restype = ctypes.c_uint32
 
+    lib.iv_engine_errors_suppressed.argtypes = [ctypes.c_void_p]
+    lib.iv_engine_errors_suppressed.restype = ctypes.c_uint64
+
     lib.iv_engine_take_errors_packed.argtypes = [
         ctypes.c_void_p,                        # handle
         ctypes.POINTER(ctypes.c_uint32),         # out_buf
@@ -396,6 +399,19 @@ class Engine:
         self._check_open()
         return int(self._lib.iv_engine_errors_count(self._handle))
 
+    @property
+    def errors_suppressed(self) -> int:
+        """
+        Number of errors found but not queued because the queue was at
+        max_errors.
+
+        max_errors caps how many errors are RECORDED, never which rows are
+        read, counted or validated, so drained errors plus this is the exact
+        number of problems in the file.
+        """
+        self._check_open()
+        return int(self._lib.iv_engine_errors_suppressed(self._handle))
+
     def take_errors(self, max_errors: int = 100_000) -> List[ValidationError]:
         """Drain and decode all queued errors (up to max_errors)."""
         self._check_open()
@@ -496,15 +512,17 @@ def validate_bytes(
 ) -> "ValidationResult":
     """Validate all of csv_bytes against schema_json in one call."""
     with Engine(schema_json, max_errors=max_errors, emit_normalized=emit_normalized) as engine:
+        parts: List[bytes] = []
         offset = 0
         while offset < len(csv_bytes):
             end = min(offset + chunk_size, len(csv_bytes))
             is_last = end >= len(csv_bytes)
             engine.push_chunk(csv_bytes[offset:end], final=is_last)
+            _drain_normalized(engine, emit_normalized, parts)
             offset = end
         if not csv_bytes:
             engine.push_chunk(b"", final=True)
-        return _collect_result(engine, max_errors, emit_normalized)
+        return _collect_result(engine, max_errors, emit_normalized, parts)
 
 
 def validate_file(
@@ -517,6 +535,7 @@ def validate_file(
 ) -> "ValidationResult":
     """Validate a CSV file at path against schema_json."""
     with Engine(schema_json, max_errors=max_errors, emit_normalized=emit_normalized) as engine:
+        parts: List[bytes] = []
         with open(path, "rb") as f:
             while True:
                 chunk = f.read(chunk_size)
@@ -524,7 +543,8 @@ def validate_file(
                     engine.push_chunk(b"", final=True)
                     break
                 engine.push_chunk(chunk)
-        return _collect_result(engine, max_errors, emit_normalized)
+                _drain_normalized(engine, emit_normalized, parts)
+        return _collect_result(engine, max_errors, emit_normalized, parts)
 
 
 def validate_xlsx_bytes(
@@ -561,22 +581,56 @@ class ValidationResult:
     schema_columns: List[str]
     input_columns: List[str]
     normalized: bytes
+    # Errors found but not recorded because the queue was at max_errors.
+    # len(errors) + errors_suppressed == the exact number of problems in the
+    # file; every row is validated regardless of max_errors.
+    errors_suppressed: int = 0
 
     @property
     def valid(self) -> bool:
-        return len(self.errors) == 0
+        return len(self.errors) == 0 and self.errors_suppressed == 0
 
 
-def _collect_result(engine: Engine, max_errors: int, emit_normalized: bool) -> ValidationResult:
+def _drain_normalized(engine: Engine, emit_normalized: bool, parts: List[bytes]) -> None:
+    """
+    Move whatever normalized bytes the engine has buffered into parts.
+
+    Called once per pushed chunk so the output never sits in the native heap
+    and the Python heap at the same time (take_normalized hands over the
+    buffer and keeps an empty one for the next chunk).
+    """
+    if not emit_normalized:
+        return
+    piece = engine.take_normalized()
+    if piece:
+        parts.append(piece)
+
+
+def _collect_result(
+    engine: Engine,
+    max_errors: int,
+    emit_normalized: bool,
+    normalized_parts: Optional[List[bytes]] = None,
+) -> ValidationResult:
     schema_cols = engine.schema_columns()
     input_cols = engine.input_columns()
     errors = engine.take_errors(max_errors)
-    normalized = engine.take_normalized() if emit_normalized else b""
+    # Errors are drained once, here at the end: the engine's queue holds at most
+    # max_errors, so a single drain empties it. max_errors never limits how much
+    # of the file is validated — every row is read, counted and checked — so
+    # draining only at the end simply makes max_errors an effective per-file
+    # total for this binding. Problems past that total are not lost silently:
+    # they are counted and reported as errors_suppressed.
+    suppressed = engine.errors_suppressed
+    parts = normalized_parts if normalized_parts is not None else []
+    _drain_normalized(engine, emit_normalized, parts)  # tail from the final chunk
+    normalized = b"".join(parts) if parts else b""
     return ValidationResult(
         errors=errors,
         schema_columns=schema_cols,
         input_columns=input_cols,
         normalized=normalized,
+        errors_suppressed=suppressed,
     )
 
 

@@ -71,6 +71,7 @@ namespace ImportValidator
         internal static int       ValidateXlsxBytes(IntPtr h, IntPtr d, uint l, ref IvProgress p, IntPtr eb, uint ebl)
             => _lib.Value.iv_engine_validate_xlsx_bytes(h, d, l, ref p, eb, ebl);
         internal static uint      ErrorsCount(IntPtr h)         => _lib.Value.iv_engine_errors_count(h);
+        internal static ulong     ErrorsSuppressed(IntPtr h)    => _lib.Value.iv_engine_errors_suppressed(h);
         internal static uint      TakeErrorsPacked(IntPtr h, uint[] buf, uint n)
             => _lib.Value.iv_engine_take_errors_packed(h, buf, n);
         internal static IntPtr    SchemaColumnsJson(IntPtr h)   => _lib.Value.iv_engine_schema_columns_json(h);
@@ -259,6 +260,9 @@ namespace ImportValidator
         internal delegate uint ErrorsCountFn(IntPtr h);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        internal delegate ulong ErrorsSuppressedFn(IntPtr h);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         internal delegate uint TakeErrorsPackedFn(IntPtr h,
             [MarshalAs(UnmanagedType.LPArray)] uint[] buf, uint maxPairs);
 
@@ -292,6 +296,7 @@ namespace ImportValidator
         private PushSheetChunkFn?         _pushSheet;
         private ValidateXlsxBytesFn?      _validateXlsx;
         private ErrorsCountFn?            _errCount;
+        private ErrorsSuppressedFn?       _errSuppressed;
         private TakeErrorsPackedFn?       _takePacked;
         private SchemaColumnsJsonFn?      _schemaCols;
         private InputColumnsJsonFn?       _inputCols;
@@ -317,6 +322,8 @@ namespace ImportValidator
             => (_validateXlsx ??= Get<ValidateXlsxBytesFn>("iv_engine_validate_xlsx_bytes"))(h, d, l, ref p, eb, ebl);
         internal uint iv_engine_errors_count(IntPtr h)
             => (_errCount ??= Get<ErrorsCountFn>("iv_engine_errors_count"))(h);
+        internal ulong iv_engine_errors_suppressed(IntPtr h)
+            => (_errSuppressed ??= Get<ErrorsSuppressedFn>("iv_engine_errors_suppressed"))(h);
         internal uint iv_engine_take_errors_packed(IntPtr h, uint[] buf, uint n)
             => (_takePacked ??= Get<TakeErrorsPackedFn>("iv_engine_take_errors_packed"))(h, buf, n);
         internal IntPtr iv_engine_schema_columns_json(IntPtr h)
@@ -385,7 +392,11 @@ namespace ImportValidator
 
         /// <summary>Create an engine from a JSON schema string.</summary>
         /// <param name="schemaJson">Schema JSON (see docs/validation-config.schema.json).</param>
-        /// <param name="maxErrors">Stop accumulating errors after this many.</param>
+        /// <param name="maxErrors">
+        /// Cap on how many errors the engine RECORDS. Validation never stops early:
+        /// every row is read, counted and validated. Errors past the cap are counted
+        /// in <see cref="ErrorsSuppressed"/>.
+        /// </param>
         /// <param name="emitNormalized">Collect normalised CSV output.</param>
         public Engine(string schemaJson, uint maxErrors = 10_000, bool emitNormalized = false)
         {
@@ -581,6 +592,17 @@ namespace ImportValidator
         public uint ErrorsCount
         {
             get { CheckOpen(); return Native.ErrorsCount(_handle); }
+        }
+
+        /// <summary>
+        /// Number of errors found but not queued because the queue was already at
+        /// <c>maxErrors</c>. Every row is still read, counted and validated — this
+        /// counter is what the cap costs you in detail, not in coverage. Drained
+        /// errors + this = the exact number of problems in the file.
+        /// </summary>
+        public ulong ErrorsSuppressed
+        {
+            get { CheckOpen(); return Native.ErrorsSuppressed(_handle); }
         }
 
         /// <summary>Drain and decode queued errors.</summary>
@@ -817,18 +839,28 @@ namespace ImportValidator
         public IReadOnlyList<string>          SchemaColumns  { get; }
         public IReadOnlyList<string>          InputColumns   { get; }
         public byte[]                         Normalized     { get; }
-        public bool                           IsValid        => Errors.Count == 0;
+        public bool                           IsValid        => Errors.Count == 0 && ErrorsSuppressed == 0;
+
+        /// <summary>
+        /// Errors the engine found but did not record because the <c>maxErrors</c>
+        /// cap was already reached. The whole file was still validated, so
+        /// <c>Errors.Count + ErrorsSuppressed</c> is the exact number of problems
+        /// in the file.
+        /// </summary>
+        public ulong                          ErrorsSuppressed { get; }
 
         internal ValidationResult(
             List<ValidationError> errors,
             List<string> schemaCols,
             List<string> inputCols,
-            byte[] normalized)
+            byte[] normalized,
+            ulong errorsSuppressed = 0)
         {
-            Errors        = errors;
-            SchemaColumns = schemaCols;
-            InputColumns  = inputCols;
-            Normalized    = normalized;
+            Errors           = errors;
+            SchemaColumns    = schemaCols;
+            InputColumns     = inputCols;
+            Normalized       = normalized;
+            ErrorsSuppressed = errorsSuppressed;
         }
     }
 
@@ -849,18 +881,20 @@ namespace ImportValidator
             int     chunkSize       = 256 * 1024)
         {
             using var engine = new Engine(schemaJson, maxErrors, emitNormalized);
+            List<byte[]>? normalizedParts = emitNormalized ? new List<byte[]>() : null;
             int offset = 0;
             while (offset < csvBytes.Length)
             {
                 int end    = Math.Min(offset + chunkSize, csvBytes.Length);
                 bool final = end >= csvBytes.Length;
                 engine.PushChunk(new ReadOnlySpan<byte>(csvBytes, offset, end - offset), final);
+                DrainNormalized(engine, normalizedParts);
                 offset = end;
             }
             if (csvBytes.Length == 0)
                 engine.PushChunk(ReadOnlySpan<byte>.Empty, true);
 
-            return CollectResult(engine, maxErrors, emitNormalized);
+            return CollectResult(engine, maxErrors, emitNormalized, normalizedParts);
         }
 
         /// <summary>Validate a CSV file against a schema.</summary>
@@ -872,6 +906,7 @@ namespace ImportValidator
             int    chunkSize      = 256 * 1024)
         {
             using var engine = new Engine(schemaJson, maxErrors, emitNormalized);
+            List<byte[]>? normalizedParts = emitNormalized ? new List<byte[]>() : null;
             byte[] buf = new byte[chunkSize];
             using var fs = System.IO.File.OpenRead(filePath);
             int read;
@@ -880,12 +915,13 @@ namespace ImportValidator
             {
                 bool isLast = fs.Position >= fs.Length;
                 engine.PushChunk(new ReadOnlySpan<byte>(buf, 0, read), isLast);
+                DrainNormalized(engine, normalizedParts);
                 if (isLast) sentFinal = true;
             }
             if (!sentFinal)
                 engine.PushChunk(ReadOnlySpan<byte>.Empty, true);
 
-            return CollectResult(engine, maxErrors, emitNormalized);
+            return CollectResult(engine, maxErrors, emitNormalized, normalizedParts);
         }
 
         /// <summary>Validate a complete in-memory .xlsx workbook against a schema.</summary>
@@ -911,13 +947,70 @@ namespace ImportValidator
                                      maxErrors, emitNormalized);
         }
 
-        private static ValidationResult CollectResult(Engine engine, uint maxErrors, bool emitNormalized)
+        private static ValidationResult CollectResult(Engine engine, uint maxErrors, bool emitNormalized,
+                                                      List<byte[]>? normalizedParts = null)
         {
+            // Drain in bounded batches so a large maxErrors does not force one
+            // oversized scratch buffer (TakeErrors allocates maxErrors * 2 words).
+            // Errors are deliberately NOT drained per chunk: the engine's queue
+            // caps at maxErrors, so draining only at the end makes maxErrors an
+            // effective per-file total for these one-shot helpers. That costs no
+            // coverage — the engine reads, counts and validates every row either
+            // way — and nothing is lost silently: everything past the cap is
+            // reported as ValidationResult.ErrorsSuppressed. Draining per chunk
+            // would instead let each chunk refill the queue, turning maxErrors
+            // into a per-chunk budget and changing which errors you get back.
+            uint batch = Math.Min(maxErrors, 4096u);
+            List<ValidationError> errors = new List<ValidationError>();
+            while (engine.ErrorsCount > 0)
+            {
+                List<ValidationError> more = engine.TakeErrors(batch);
+                if (more.Count == 0) break;
+                errors.AddRange(more);
+            }
+            // Read AFTER draining: the count is cumulative and unaffected by drains.
+            ulong suppressed = engine.ErrorsSuppressed;
             return new ValidationResult(
-                engine.TakeErrors(maxErrors),
+                errors,
                 engine.SchemaColumns(),
                 engine.InputColumns(),
-                emitNormalized ? engine.TakeNormalized() : Array.Empty<byte>());
+                emitNormalized ? CombineNormalized(engine, normalizedParts) : Array.Empty<byte>(),
+                suppressed);
+        }
+
+        // ── Normalized-output draining ───────────────────────────────────────
+
+        /// <summary>
+        /// Drain the engine's normalized buffer after one chunk. Draining every
+        /// chunk keeps the native buffer small; deferring it to the end would
+        /// make the engine hold the whole normalized output at once.
+        /// </summary>
+        private static void DrainNormalized(Engine engine, List<byte[]>? parts)
+        {
+            if (parts == null) return;
+            byte[] part = engine.TakeNormalized();
+            if (part.Length > 0) parts.Add(part);
+        }
+
+        /// <summary>Final drain, then concatenate the per-chunk pieces.</summary>
+        private static byte[] CombineNormalized(Engine engine, List<byte[]>? parts)
+        {
+            byte[] tail = engine.TakeNormalized();
+            if (parts == null || parts.Count == 0) return tail;
+            if (tail.Length > 0) parts.Add(tail);
+            if (parts.Count == 1) return parts[0];
+
+            long total = 0;
+            foreach (byte[] p in parts) total += p.Length;
+            byte[] result = new byte[total];
+            int at = 0;
+            for (int i = 0; i < parts.Count; i++)
+            {
+                Buffer.BlockCopy(parts[i], 0, result, at, parts[i].Length);
+                at += parts[i].Length;
+                parts[i] = Array.Empty<byte>();   // release as we copy
+            }
+            return result;
         }
     }
 }

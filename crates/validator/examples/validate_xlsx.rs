@@ -93,8 +93,14 @@ fn main() -> ExitCode {
     println!("schema columns: {}", validator.schema_columns().join(", "));
     println!("input columns:  {}", validator.input_columns().join(", "));
     println!("rows processed: {}", validator.rows_processed());
-    println!("errors:         {total_errors}");
-    if total_errors == 0 {
+    // max_errors caps recording, not validation: anything that did not fit is
+    // counted here rather than lost, so the verdict stays honest.
+    let suppressed = validator.errors_suppressed();
+    println!("errors:         {}", total_errors + suppressed);
+    if suppressed > 0 {
+        println!("                ({total_errors} shown, {suppressed} over max_errors)");
+    }
+    if total_errors + suppressed == 0 {
         println!("result:         VALID");
         ExitCode::SUCCESS
     } else {

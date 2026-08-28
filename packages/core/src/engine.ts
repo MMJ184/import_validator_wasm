@@ -22,12 +22,18 @@ export class Engine {
     private engine: any;
     private cachedSchemaColumns: string[] | null = null;
     private cachedInputColumns: string[] | null = null;
+    /**
+     * Whether this engine accumulates normalized output. Hosts must drain with
+     * takeNormalized() whenever this is true — the engine buffers until they do.
+     */
+    readonly emitNormalized: boolean = false;
     private constructor() {}
 
     static async create(schema: object, maxErrors: number, emitNormalized: boolean) {
         const mod = await requireMod();
         const inst = new Engine();
         inst.engine = new mod.ValidatorEngine(JSON.stringify(schema), maxErrors, emitNormalized);
+        (inst as { emitNormalized: boolean }).emitNormalized = emitNormalized;
         return inst;
     }
 
@@ -106,6 +112,20 @@ export class Engine {
 
     errorsLen(): number {
         return this.engine.errors_count() as number;
+    }
+
+    /**
+     * Errors found but not kept because the queue was at `maxErrors`.
+     * `maxErrors` caps what is recorded, never which rows are validated, so
+     * errors received plus this is the exact total in the file — enough to
+     * render "showing 2,000 of 47,331".
+     *
+     * Unguarded on purpose: the WASM binary ships inside this package, so the
+     * export is always present. A missing export should fail loudly rather
+     * than report 0 and let a caller claim it saw every error.
+     */
+    errorsSuppressed(): number {
+        return this.engine.errors_suppressed() as number;
     }
 
     /** Total data rows processed so far (header excluded). */

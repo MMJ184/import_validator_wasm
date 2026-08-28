@@ -78,11 +78,16 @@ pub struct ValidatorCore {
     // Errors collected (drained by the host)
     errors: VecDeque<PackedError>,
     max_errors: u32,
+    // Errors found while the queue was full. Validation is never skipped, so
+    // this is an exact count of what was dropped, not an estimate.
+    errors_suppressed: u64,
 
     // Normalized output (optional, drained by the host)
     emit_normalized: bool,
     normalized: Vec<u8>,
-    normalized_buf_limit: usize,
+    // Upper bound on the capacity kept across drains. Not a cap on content:
+    // one chunk may produce more than this, and no row is ever dropped to fit.
+    normalized_keep_capacity: usize,
 
     // Per-record reusable starts buffer: starts[i] is start offset for field i
     starts: Vec<usize>,
@@ -340,6 +345,7 @@ impl ValidatorCore {
             data_row: 0,
             errors: VecDeque::new(),
             max_errors,
+            errors_suppressed: 0,
             emit_normalized,
             // Only pre-allocate normalized buffer when normalization is on.
             normalized: if emit_normalized {
@@ -347,7 +353,7 @@ impl ValidatorCore {
             } else {
                 Vec::new()
             },
-            normalized_buf_limit: 2 * 1024 * 1024, // drain frequently
+            normalized_keep_capacity: 2 * 1024 * 1024,
             starts: Vec::with_capacity(256),
             allowed_sets,
             unique_sets,
@@ -376,7 +382,9 @@ impl ValidatorCore {
     pub fn push_chunk(&mut self, chunk: &[u8], final_chunk: bool) -> Result<Progress, String> {
         self.enter_mode(InputMode::Csv)?;
 
-        let before_errs = self.errors.len() as u32;
+        // Count errors FOUND, not just queued: once the queue is full the
+        // queue-length delta reads 0 while the file is still producing errors.
+        let before_errs = self.errors_found();
         let before_rows = self.data_row;
 
         if !chunk.is_empty() {
@@ -389,7 +397,7 @@ impl ValidatorCore {
 
         Ok(Progress {
             rows_processed: self.data_row - before_rows,
-            errors_added: (self.errors.len() as u32).saturating_sub(before_errs),
+            errors_added: self.errors_found().saturating_sub(before_errs),
             done: final_chunk,
         })
     }
@@ -432,7 +440,9 @@ impl ValidatorCore {
             );
         }
 
-        let before_errs = self.errors.len() as u32;
+        // Count errors FOUND, not just queued: once the queue is full the
+        // queue-length delta reads 0 while the file is still producing errors.
+        let before_errs = self.errors_found();
         let before_rows = self.data_row;
 
         let mut scanner = self.sheet_scanner.take().unwrap_or_default();
@@ -442,7 +452,7 @@ impl ValidatorCore {
 
         Ok(Progress {
             rows_processed: self.data_row - before_rows,
-            errors_added: (self.errors.len() as u32).saturating_sub(before_errs),
+            errors_added: self.errors_found().saturating_sub(before_errs),
             done: final_chunk,
         })
     }
@@ -516,7 +526,16 @@ impl ValidatorCore {
 
     /// Drain normalized CSV bytes accumulated so far (if enabled).
     pub fn take_normalized(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.normalized)
+        if self.normalized.is_empty() {
+            return Vec::new();
+        }
+        // Hand the filled buffer to the caller but keep a right-sized empty one
+        // so the next chunk does not re-grow from zero capacity.
+        let keep = self
+            .normalized
+            .capacity()
+            .min(self.normalized_keep_capacity);
+        std::mem::replace(&mut self.normalized, Vec::with_capacity(keep))
     }
 
     /// Stable string mapping for error code.
@@ -580,7 +599,7 @@ impl ValidatorCore {
                     self.out = out_buf;
                     self.ends = ends_buf;
 
-                    if self.hit_error_limit() || input.is_empty() {
+                    if input.is_empty() {
                         return;
                     }
                 }
@@ -626,10 +645,6 @@ impl ValidatorCore {
 
                     self.out = out_buf;
                     self.ends = ends_buf;
-
-                    if self.hit_error_limit() {
-                        return;
-                    }
                 }
                 ReadRecordResult::OutputFull => {
                     let n = self.out.len().max(64) * 2;
@@ -716,10 +731,6 @@ impl ValidatorCore {
                     ColKind::Input,
                 );
             }
-
-            if self.hit_error_limit() {
-                return;
-            }
         }
 
         // Missing required fields if row shorter than schema (no headers case)
@@ -734,9 +745,6 @@ impl ValidatorCore {
                             ErrorCode::MissingRequired,
                             ColKind::Schema,
                         );
-                        if self.hit_error_limit() {
-                            return;
-                        }
                     }
                 }
             }
@@ -749,13 +757,13 @@ impl ValidatorCore {
             let row_vals = std::mem::take(&mut self.row_values);
             self.check_composite_uniques(&row_vals);
             self.row_values = row_vals;
-            if self.hit_error_limit() {
-                return;
-            }
         }
 
-        // Emit normalized row using already-computed canonical values.
-        if self.emit_normalized && self.normalized.len() < self.normalized_buf_limit {
+        // Emit normalized row using already-computed canonical values. Never
+        // skipped and never size-gated, so the normalized row count always
+        // tracks `rows_processed`: the host drains once per chunk, and one
+        // chunk may legitimately produce more bytes than the retained capacity.
+        if self.emit_normalized {
             let row_vals = std::mem::take(&mut self.row_values);
             self.write_normalized_row(&row_vals);
             self.row_values = row_vals;
@@ -1130,10 +1138,6 @@ impl ValidatorCore {
             } else {
                 self.normalized.push(b'\n');
             }
-
-            if self.normalized.len() >= self.normalized_buf_limit {
-                break;
-            }
         }
     }
 
@@ -1161,6 +1165,10 @@ impl ValidatorCore {
 
     pub(crate) fn push_err(&mut self, row: u32, col: u32, code: ErrorCode, kind: ColKind) {
         if (self.errors.len() as u32) >= self.max_errors {
+            // Queue full: record the count only. Validation itself is never
+            // skipped, so this stays an exact total of what the file contains,
+            // letting hosts report "showing N of TOTAL".
+            self.errors_suppressed = self.errors_suppressed.saturating_add(1);
             return;
         }
         self.errors.push_back(PackedError {
@@ -1171,8 +1179,21 @@ impl ValidatorCore {
         });
     }
 
-    pub(crate) fn hit_error_limit(&self) -> bool {
-        (self.errors.len() as u32) >= self.max_errors
+    /// Errors found so far, whether or not they fit in the queue. Saturates at
+    /// u32 so a `Progress` delta stays meaningful on absurd inputs.
+    fn errors_found(&self) -> u32 {
+        (self.errors.len() as u64)
+            .saturating_add(self.errors_suppressed)
+            .min(u32::MAX as u64) as u32
+    }
+
+    /// Errors found but not recorded because the queue was at `max_errors`.
+    ///
+    /// `max_errors` caps how many errors are *kept*; it never changes which
+    /// rows are read, counted, or validated. So `errors_suppressed` plus every
+    /// error drained is the exact number of problems in the file.
+    pub fn errors_suppressed(&self) -> u64 {
+        self.errors_suppressed
     }
 }
 
@@ -1512,6 +1533,102 @@ mod tests {
         assert_eq!(count_code(&codes, ErrorCode::DuplicateValue as u8), 1);
         assert_eq!(count_code(&codes, ErrorCode::InvalidType as u8), 1);
         assert_eq!(engine.rows_processed(), 3);
+    }
+
+    #[test]
+    fn normalized_output_keeps_every_row_intact_past_buffer_limit() {
+        // Hosts drain normalized bytes once per chunk, so a single chunk can
+        // legitimately produce more normalized output than the in-engine
+        // buffer's soft limit. No row may be dropped or truncated.
+        let schema_json = json!({
+            "hasHeaders": false,
+            "columns": [
+                { "name": "id", "type": "int" },
+                { "name": "note", "type": "string" }
+            ]
+        })
+        .to_string();
+
+        // Width 41 is one that made the old code stop mid-row rather than
+        // between rows, so this fixture covers both the dropped-row and the
+        // truncated-row halves of the bug.
+        let rows = 60_000usize;
+        let filler = "x".repeat(41);
+        let mut input = String::new();
+        for i in 0..rows {
+            input.push_str(&format!("{i},{filler}\n"));
+        }
+        assert!(
+            input.len() > 2 * 1024 * 1024,
+            "fixture must exceed the limit"
+        );
+
+        let mut engine = ValidatorCore::new(&schema_json, 1000, true).expect("engine init");
+        engine.parse_slice(input.as_bytes());
+        engine.flush_end();
+
+        let normalized = String::from_utf8(engine.take_normalized()).expect("utf8 normalized");
+        assert!(
+            normalized.ends_with('\n'),
+            "normalized output must not end mid-row"
+        );
+
+        let lines: Vec<&str> = normalized.lines().collect();
+        assert_eq!(lines.len(), rows, "every row must reach normalized output");
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(*line, format!("{i},{filler}"), "row {i} must be complete");
+        }
+    }
+
+    #[test]
+    fn error_limit_caps_recording_without_skipping_rows() {
+        // max_errors bounds what is KEPT. Every row must still be read,
+        // counted and validated, whatever the chunking — otherwise
+        // rows_processed silently under-reports on error-dense files.
+        let schema_json = json!({
+            "hasHeaders": true,
+            "columns": [
+                { "name": "id", "type": "int" },
+                { "name": "email", "type": "email" }
+            ]
+        })
+        .to_string();
+
+        let rows = 5_000usize;
+        let mut input = String::from("id,email\n");
+        for i in 0..rows {
+            input.push_str(&format!("{i},not-an-email\n"));
+        }
+
+        for chunk_size in [7usize, 64, 1024, input.len()] {
+            let mut engine = ValidatorCore::new(&schema_json, 10, true).expect("engine init");
+            for chunk in input.as_bytes().chunks(chunk_size) {
+                engine.parse_slice(chunk);
+            }
+            engine.flush_end();
+
+            assert_eq!(
+                engine.rows_processed() as usize,
+                rows,
+                "every row must be counted (chunk size {chunk_size})"
+            );
+
+            let kept = engine.take_errors_packed(u32::MAX).len() / 2;
+            assert_eq!(kept, 10, "recording is capped at max_errors");
+            assert_eq!(
+                engine.errors_suppressed() as usize,
+                rows - 10,
+                "suppressed count must total the rest (chunk size {chunk_size})"
+            );
+
+            // Normalized output must not lose rows once the queue fills either.
+            let normalized = String::from_utf8(engine.take_normalized()).expect("utf8 normalized");
+            assert_eq!(
+                normalized.lines().count(),
+                rows,
+                "normalized output must cover every row (chunk size {chunk_size})"
+            );
+        }
     }
 
     fn take_error_codes(engine: &mut ValidatorCore) -> Vec<u8> {

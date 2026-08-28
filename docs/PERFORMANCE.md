@@ -86,18 +86,29 @@ Excel: [ZIP dir] → [inflate (native zlib / miniz)] → [XML scan] → same per
 - The browser adds chunked `File` reads and `postMessage`. The worker
   overlaps reads with compute (one-chunk read-ahead) and transfers big
   buffers (packed errors, normalized chunks) instead of structured-cloning.
+- **Push size is decoupled from inflate size** (2026-08), because the two costs
+  pull opposite ways. Inflater output size matters on the Node side: zlib's
+  default 16 KB units send a large worksheet through stream plumbing thousands
+  of times, so asking for 1 MB units is worth ~10% end to end and costs nothing
+  (zlib just writes into a bigger buffer). Engine push size, by contrast, is
+  throughput-*flat* from ~16 KB to 1 MB, so a big push buys nothing while
+  delaying everything that happens between pushes — draining errors, emitting
+  progress, noticing a cancel. Hence `rechunk`: inflate in 1 MB units, push
+  in 64 KB ones, splitting as zero-copy views. Worker macrotask yields are
+  paced by the clock (~16 ms via monotonic `performance.now()`) rather than by
+  chunk count, which is what the tick savings actually came from.
 
 ## 4. Tuning guide
 
 | Knob | Default | Effect |
 |---|---|---|
-| `chunkSize` | 128 KB – 4 MB by file size, capped by `navigator.deviceMemory` | Bigger chunks = fewer boundary crossings, more memory. The default curve is right for almost everyone; override only for unusual environments. |
+| `chunkSize` | 128 KB – 4 MB by file size, capped by `navigator.deviceMemory` | Sizes **CSV file reads only**. Bigger chunks = fewer boundary crossings, more memory. The default curve is right for almost everyone; override only for unusual environments. It does **not** affect the XLSX path, where inflate and push sizes are fixed and chosen independently (see §3) — a knob there would only let callers re-open the error-queue starvation the fixed sizes avoid. |
 | `estimate` | profile-dependent (`strict` on) | Adds a fast pre-pass (~4M rows/s) for row/col guardrails + progress denominators. Cost is now small; leave on if you use guardrails. |
-| `maxErrors` | size-based (2k–20k) | Bounds engine memory AND stops per-row work early on hopeless files. Raise only if you truly render more. |
+| `maxErrors` | size-based (2k–20k) | Caps errors *queued in the engine at once*. It bounds memory only — **every row is read, counted and validated regardless**, so `rowsProcessed` is always the true row count and never varies with chunk size. Errors found while the queue is full are counted, not discarded silently: read the total via `onDone(errorsSuppressed)` / `result.errorsSuppressed` / `iv_engine_errors_suppressed`. Because hosts drain per chunk, the queue refills and a file can still *return* well past `maxErrors`; `maxPostErrorsTotal` bounds the browser per-file total, and the Node package has no equivalent cap. **The same number means different things by host:** the browser worker and Node drain every chunk, so it is a queue depth and the returned count varies with `chunkSize`; Python/Go/C# drain only at the end, so it is an effective per-file total there. `rowsProcessed`, and returned + suppressed, are identical either way. |
 | `maxPostErrorsTotal` / `postErrorBatch` | profile | UI back-pressure; packed transfer makes batches cheap, so prefer larger batches over more messages. |
 | `emitNormalized` | off (size-gated) | ~20% throughput cost + output memory at the host. |
 | `profile` | `balanced` | `fast` = no estimate, 10k errors; `strict` = estimate + 100k errors. |
-| `timeoutMs` / `cancel()` | off / manual | Both abort cooperatively between chunks (guaranteed responsive: the pipeline yields a macrotask every chunk). |
+| `timeoutMs` / `cancel()` | off / manual | Both abort cooperatively between pushes. The pipeline yields a macrotask about every 16 ms (clock-paced, not per chunk), so a `cancel()` — which arrives as a message — is seen within roughly that plus one push. `timeoutMs` is a `setTimeout` in the worker, and a MessageChannel yield does not drain the timer phase under Node, so every 4th yield goes through `setTimeout` instead: expect timeout latency up to ~64 ms plus one push. Measured: cancel ~50 ms, a 100 ms timeout firing at ~167 ms on a 190 MB file. |
 | Schema shape | — | `unique`/`uniqueGroups` are the expensive features (hashing + set memory). `pattern` requires the full tier and regex cost per field. Plain typed columns are nearly free. |
 | `IV_WASM_SIMD=1` build | off | See §2. |
 | Native `IV_NATIVE_CPU=native` | off | Host-tuned codegen for servers you control (don't distribute such binaries). |
@@ -110,7 +121,7 @@ Excel: [ZIP dir] → [inflate (native zlib / miniz)] → [XML scan] → same per
 | `unique` column | ~24 bytes × distinct values (fingerprints, value length irrelevant) |
 | `uniqueGroups` | same, plus canonical values of member columns for the current row only |
 | Error queue | 8 bytes × queued errors, bounded by `maxErrors`; drained per chunk |
-| Normalized buffer | ≤2 MB in-engine before drain; host accumulates what it keeps |
+| Normalized buffer | one chunk's normalized output in-engine for hosts that drain per chunk (browser worker, `@import-validator/node`, the language bindings); retained capacity is capped at 2 MB between drains. Rows are never dropped or truncated to fit, so a host that drains only at the end holds the whole normalized output in the engine — as the one-shot XLSX entry points (`iv_engine_validate_xlsx_bytes`, `Validator::validate_xlsx_bytes`) necessarily do, bounded there by the XLSX size guardrails. Host accumulates what it keeps |
 | XLSX shared strings | total text bytes + 4 bytes/string (streamed once, held for the file's lifetime) |
 | XLSX sheet XML | **never held** — streamed in ~64 KB chunks (the old pipeline held the whole decoded string) |
 

@@ -52,10 +52,18 @@ export async function validateCsv(
     };
 
     const drain = () => {
-        if (decodeErrors) {
-            allDecoded.push(...engine.takeErrorsDecoded(drainErrorsEvery));
-        } else {
-            allPacked.push(...engine.takeErrors(drainErrorsEvery));
+        // Drain until the engine queue is empty: one call takes at most
+        // `drainErrorsEvery`, and a single chunk can queue far more than that.
+        while (engine.errorsLen() > 0) {
+            if (decodeErrors) {
+                const batch = engine.takeErrorsDecoded(drainErrorsEvery);
+                if (!batch.length) break;
+                for (const e of batch) allDecoded.push(e);
+            } else {
+                const batch = engine.takeErrors(drainErrorsEvery);
+                if (!batch.length) break;
+                for (const e of batch) allPacked.push(e);
+            }
         }
 
         if (drainNormalized) {

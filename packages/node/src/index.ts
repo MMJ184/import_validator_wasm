@@ -20,6 +20,9 @@ import { createInflateRaw } from "node:zlib";
 import {
     bytesSource,
     chooseChunkSizeSmart,
+    DEFAULT_INFLATE_CHUNK_BYTES,
+    DEFAULT_PUSH_CHUNK_BYTES,
+    rechunk,
     Engine,
     entryByteStream,
     initWasm,
@@ -72,6 +75,12 @@ export interface ValidationResult {
     normalized?: Uint8Array;
     /** Total data rows processed. */
     rowsProcessed: number;
+    /**
+     * Errors found but not returned because the engine queue was at
+     * `maxErrors`. `errors.length + errorsSuppressed` is the exact number of
+     * problems in the file — enough to render "showing 2,000 of 47,331".
+     */
+    errorsSuppressed: number;
     /** True when there are zero validation errors. */
     valid: boolean;
 }
@@ -122,13 +131,18 @@ async function run(
         onProgress,
     });
 
+    const suppressed = engine.errorsSuppressed();
+
     return {
         errors: result.errorsDecoded ?? [],
         schemaColumns: engine.schemaColumns(),
         inputColumns: engine.inputColumns(),
         normalized: result.normalized,
         rowsProcessed: result.progress.rowsProcessed,
-        valid: (result.errorsDecoded?.length ?? 0) === 0,
+        errorsSuppressed: suppressed,
+        // Suppressed errors still make a file invalid — with maxErrors: 0
+        // nothing is returned, and reporting valid here would be plainly wrong.
+        valid: (result.errorsDecoded?.length ?? 0) === 0 && suppressed === 0,
     };
 }
 
@@ -331,8 +345,16 @@ async function runXlsx(
 
     const engine = await Engine.create(schema, maxErrors, emitNormalized);
 
+    // Push size is independent of `chunkSize` (a file-read hint): pushes are
+    // throughput-flat but a large one widens the error-queue window. See rechunk.
+    const pushChunkBytes = DEFAULT_PUSH_CHUNK_BYTES;
+
     if (sharedEntry) {
-        for await (const chunk of entryByteStream(source, sharedEntry, inflateRawNode)) {
+        const sharedChunks = rechunk(
+            entryByteStream(source, sharedEntry, inflateRawNode),
+            pushChunkBytes
+        );
+        for await (const chunk of sharedChunks) {
             throwIfAborted(signal);
             engine.pushSharedStringsChunk(chunk, false);
         }
@@ -344,14 +366,25 @@ async function runXlsx(
     const totals: Progress = { rowsProcessed: 0, errorsAdded: 0, done: false };
 
     const drain = () => {
-        errors.push(...engine.takeErrorsDecoded(5_000));
+        // Drain to empty: one call takes at most 5,000 errors, and a single
+        // sheet chunk can queue more. A residue would be reported as
+        // suppressed rather than returned, losing detail the caller could have had.
+        while (engine.errorsLen() > 0) {
+            const batch = engine.takeErrorsDecoded(5_000);
+            if (!batch.length) break;
+            for (const e of batch) errors.push(e);
+        }
         if (emitNormalized) {
             const chunk = engine.takeNormalized();
             if (chunk.length) normalizedParts.push(chunk);
         }
     };
 
-    for await (const chunk of entryByteStream(source, sheetEntry, inflateRawNode)) {
+    const sheetChunks = rechunk(
+        entryByteStream(source, sheetEntry, inflateRawNode),
+        pushChunkBytes
+    );
+    for await (const chunk of sheetChunks) {
         throwIfAborted(signal);
         const progress = engine.pushSheetChunk(chunk, false);
         totals.rowsProcessed += progress.rowsProcessed;
@@ -364,8 +397,8 @@ async function runXlsx(
     totals.rowsProcessed += final.rowsProcessed;
     totals.errorsAdded += final.errorsAdded;
     drain();
-    // drain any errors beyond the per-pass batch size
-    while (engine.errorsLen() > 0) drain();
+
+    const suppressed = engine.errorsSuppressed();
 
     return {
         errors,
@@ -373,13 +406,23 @@ async function runXlsx(
         inputColumns: engine.inputColumns(),
         normalized: normalizedParts.length ? concat(normalizedParts) : undefined,
         rowsProcessed: totals.rowsProcessed,
-        valid: errors.length === 0,
+        errorsSuppressed: suppressed,
+        valid: errors.length === 0 && suppressed === 0,
     };
 }
 
-/** Node inflate adapter for the shared ZIP reader (raw DEFLATE via zlib). */
+/**
+ * Node inflate adapter for the shared ZIP reader (raw DEFLATE via zlib).
+ *
+ * zlib's default output chunk is 16 KB, so a large worksheet is emitted as
+ * thousands of buffers, each paying stream plumbing (allocation, backpressure,
+ * event emitters). Asking for 1 MB units yields the same bytes for a fraction
+ * of that overhead, and costs nothing — zlib just writes into a bigger buffer.
+ * `rechunk` then splits the output back down for the engine, which is free
+ * (subarray views) and keeps the error-queue window small.
+ */
 const inflateRawNode: InflateRaw = (compressed) => {
-    const inflate = createInflateRaw();
+    const inflate = createInflateRaw({ chunkSize: DEFAULT_INFLATE_CHUNK_BYTES });
     return Readable.from(compressed).pipe(inflate) as AsyncIterable<Uint8Array>;
 };
 

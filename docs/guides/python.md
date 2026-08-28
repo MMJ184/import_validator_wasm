@@ -42,6 +42,27 @@ for e in result.errors:
 
 Also: `iv.validate_file(path, schema, max_errors=..., emit_normalized=...)`.
 
+`ValidationResult` fields: `errors`, `schema_columns`, `input_columns`,
+`normalized`, `errors_suppressed`, plus the `valid` property.
+
+## max_errors and `errors_suppressed`
+
+`max_errors` caps how many errors are **recorded**, never how much of the file
+is validated. Every row is always read, counted and checked; errors past the
+cap are counted rather than dropped, and `result.errors_suppressed` reports how
+many there were.
+
+```python
+result = iv.validate_bytes(data, schema, max_errors=2_000)
+total = len(result.errors) + result.errors_suppressed   # exact problem count
+print(f"showing {len(result.errors):,} of {total:,}")   # showing 2,000 of 47,331
+```
+
+`len(result.errors) + result.errors_suppressed` is the exact number of problems
+in the file, so a UI can show a truncated list and still report the true total.
+On the streaming `Engine`, the same number is available as
+`engine.errors_suppressed` once the final chunk has been pushed.
+
 ## Excel (.xlsx)
 
 ```python
@@ -57,15 +78,35 @@ and error codes as CSV.
 
 ```python
 with iv.Engine(schema, max_errors=10_000, emit_normalized=True) as engine:
+    parts = []
     for chunk in read_chunks(source):            # any byte chunks
         progress = engine.push_chunk(chunk)
+        parts.append(engine.take_normalized())   # drain per chunk, not at the end
     engine.push_chunk(b"", final=True)
+    parts.append(engine.take_normalized())
 
     for err in engine.iter_errors(batch_size=5_000):
         handle(err)
-    normalized = engine.take_normalized()
-    print(engine.rows_processed, engine.schema_columns())
+    normalized = b"".join(parts)
+    print(engine.rows_processed, engine.errors_suppressed, engine.schema_columns())
 ```
+
+`engine.rows_processed` counts every data row in the file regardless of
+`max_errors`. Draining with `iter_errors` mid-stream frees queue slots, so a
+long-running `Engine` can surface more than `max_errors` errors in total; the
+one-shot helpers drain only at the end, which makes `max_errors` an effective
+per-file total there.
+
+`take_normalized()` hands over only what accumulated since the last call, so
+calling it once per chunk — or writing each piece straight to a file/socket —
+keeps peak memory at one chunk instead of the whole output. The one-shot
+helpers `validate_bytes` / `validate_file` drain per chunk internally but still
+return the complete output as `result.normalized`. The one-shot XLSX helpers
+(`validate_xlsx_bytes`, `validate_xlsx_file`) cannot drain mid-run — the engine
+holds the entire normalized output until the single call returns, bounded by
+the XLSX size guardrails. Either way, with
+`emit_normalized=True` expect memory proportional to the normalized output
+size, and prefer the `Engine` loop above for very large files.
 
 XLSX streaming (when you inflate yourself):
 `engine.push_shared_strings_chunk(chunk, final=...)` first, then

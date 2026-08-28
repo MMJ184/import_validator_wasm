@@ -272,3 +272,49 @@ fn sheet_row_counter_counts_rows_and_columns() {
         assert_eq!(cols, Some(5), "chunk={chunk_size}");
     }
 }
+
+#[test]
+fn xlsx_error_limit_caps_recording_without_skipping_rows() {
+    // The sheet scanner used to abandon the rest of a chunk once the engine's
+    // error queue filled — and it returned without carrying the remaining
+    // bytes, so that data was dropped outright. Rows validated must now be
+    // identical at every chunk size, whatever max_errors is.
+    let reference_rows = run_streaming(1 << 20).0;
+
+    for max_errors in [1u32, 2, 10_000] {
+        for chunk_size in [1usize, 2, 3, 7, 17, 64, 257, 1024, 1 << 20] {
+            let mut v = Validator::new(
+                SCHEMA,
+                ValidatorOptions {
+                    max_errors,
+                    ..ValidatorOptions::default()
+                },
+            )
+            .expect("schema");
+
+            for chunk in SHARED.chunks(chunk_size) {
+                v.push_shared_strings_chunk(chunk, false)
+                    .expect("shared push");
+            }
+            v.push_shared_strings_chunk(&[], true)
+                .expect("shared finish");
+            for chunk in SHEET.chunks(chunk_size) {
+                v.push_sheet_chunk(chunk, false).expect("sheet push");
+            }
+            v.push_sheet_chunk(&[], true).expect("sheet finish");
+
+            assert_eq!(
+                v.rows_processed(),
+                reference_rows,
+                "max_errors={max_errors} chunk_size={chunk_size}: every row must be read"
+            );
+
+            let kept = v.take_errors(10_000).len() as u64;
+            assert_eq!(
+                kept + v.errors_suppressed(),
+                3,
+                "max_errors={max_errors} chunk_size={chunk_size}: kept + suppressed must be exact"
+            );
+        }
+    }
+}

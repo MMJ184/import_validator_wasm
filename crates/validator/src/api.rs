@@ -27,7 +27,9 @@ use std::fmt;
 /// Options for [`Validator::new`].
 #[derive(Debug, Clone)]
 pub struct ValidatorOptions {
-    /// Stop accumulating errors after this many (bounds memory). Default 10_000.
+    /// Stop *recording* errors after this many (bounds memory). Default 10_000.
+    /// Every row is still read, counted and validated; the excess is counted by
+    /// [`Validator::errors_suppressed`].
     pub max_errors: u32,
     /// Collect normalized CSV output (drain with [`Validator::take_normalized`]).
     pub emit_normalized: bool,
@@ -184,6 +186,14 @@ impl Validator {
     /// Errors currently queued (not yet drained).
     pub fn errors_count(&self) -> u32 {
         self.core.errors_count()
+    }
+
+    /// Errors found but not queued because the queue was at `max_errors`.
+    ///
+    /// `max_errors` caps what is kept, never which rows are validated, so
+    /// drained errors plus this is the exact number of problems in the file.
+    pub fn errors_suppressed(&self) -> u64 {
+        self.core.errors_suppressed()
     }
 
     /// Total data rows processed so far.

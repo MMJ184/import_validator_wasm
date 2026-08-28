@@ -26,7 +26,9 @@ pub struct IvProgress {
 /// Create a new validator engine.
 ///
 /// `schema_json`      NUL-terminated UTF-8 JSON matching the schema contract.
-/// `max_errors`       Stop accumulating errors after this many (prevents unbounded memory).
+/// `max_errors`       Stop *recording* errors after this many (bounds memory).
+///                    Every row is still read, counted and validated; the
+///                    excess is counted by `iv_engine_errors_suppressed`.
 /// `emit_normalized`  1 to collect normalized CSV output, 0 to disable.
 /// `err_buf`          Caller-allocated buffer for an error message on failure (may be NULL).
 /// `err_buf_len`      Byte capacity of err_buf (including NUL terminator).
@@ -261,6 +263,20 @@ pub unsafe extern "C" fn iv_engine_errors_count(handle: *const ValidatorCore) ->
         return 0;
     }
     (*handle).errors_count()
+}
+
+/// Returns the number of errors found but not queued because the queue was at
+/// `max_errors`. Validation is never skipped, so drained errors plus this is
+/// the exact number of problems in the file.
+///
+/// # Safety
+/// `handle` must be NULL or a live engine pointer.
+#[no_mangle]
+pub unsafe extern "C" fn iv_engine_errors_suppressed(handle: *const ValidatorCore) -> u64 {
+    if handle.is_null() {
+        return 0;
+    }
+    (*handle).errors_suppressed()
 }
 
 /// Drain up to `max_pairs` errors into `out_buf`.

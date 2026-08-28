@@ -35,7 +35,16 @@ export interface ValidatorEvents {
     onProgress?(p: Progress): void;
     onErrors?(errors: DecodedError[]): void;
     onNormalized?(chunk: Uint8Array): void;
-    onDone?(): void;
+    /**
+     * `errorsSuppressed`: every error found but not delivered — capped by the
+     * engine's `maxErrors` queue, filtered out by `maxErrorRowsToShow`, or
+     * still queued when `maxPostErrorsTotal` was reached. Errors received plus
+     * this is the exact total, so a UI can say "showing 2,000 of 47,331".
+     *
+     * Two caveats: with `dryRunRows` the total covers only the rows actually
+     * validated, and it is `0` for an `estimateOnly` run (nothing was checked).
+     */
+    onDone?(errorsSuppressed?: number): void;
     onFatal?(msg: string, fatal?: ValidationFatal): void;
 }
 

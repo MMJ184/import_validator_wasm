@@ -57,9 +57,9 @@ prefer `validateXlsxFile` for large uploads you have persisted to disk.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `maxErrors` | 10 000 | Stop accumulating errors after this many |
+| `maxErrors` | 10 000 | Cap on errors queued in the engine *at any one moment*, not a per-file total — it bounds memory only. Every row is validated either way, and errors that did not fit are counted in `result.errorsSuppressed`. The queue drains after every chunk, so a file can return many more errors than this |
 | `emitNormalized` | false | Collect normalized CSV bytes (`result.normalized`) |
-| `chunkSize` | auto | Byte chunk size for streaming reads |
+| `chunkSize` | auto | Byte chunk size for streaming CSV reads. Ignored for `.xlsx`, where inflate and engine-push sizes are fixed independently |
 | `onProgress` | — | `({rowsProcessed, errorsAdded})` per chunk |
 | `signal` | — | `AbortSignal` to cancel mid-stream |
 | `wasmUrl` | bundled | Path override for the `.wasm` binary |
@@ -67,7 +67,12 @@ prefer `validateXlsxFile` for large uploads you have persisted to disk.
 ## Result shape
 
 `{ errors: DecodedError[], schemaColumns, inputColumns, normalized?,
-rowsProcessed, valid }` — `DecodedError` carries `row` (1-based, 0 = header),
+rowsProcessed, errorsSuppressed, valid }` — `errors.length + errorsSuppressed`
+is the exact number of problems in the file, so a caller that caps `maxErrors`
+can still report "showing 2,000 of 47,331". (How that total splits between the
+two does depend on `chunkSize` — the queue drains between chunks, so smaller
+chunks return more errors and suppress fewer. `rowsProcessed` and the total do
+not vary.) `DecodedError` carries `row` (1-based, 0 = header),
 `colIndex`, `colKind` (`schema|input`), `columnName`, `code`, `codeString`,
 `message`.
 

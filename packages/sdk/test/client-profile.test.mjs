@@ -77,3 +77,17 @@ test("explicit per-call options beat profile defaults", () => {
     const msg = lastValidateMessage(worker);
     assert.equal(msg.options.maxPostErrorsTotal, 123);
 });
+
+test("constructor emitNormalized reaches validate calls", () => {
+    // Every profile default is false, so without a constructor tier this option
+    // would only ever configure the warm-up engine and never emit anything.
+    const { client, worker } = makeClient({ emitNormalized: true });
+    client.validate(file);
+    assert.equal(lastValidateMessage(worker).options.emitNormalized, true);
+});
+
+test("per-call emitNormalized overrides the constructor value", () => {
+    const { client, worker } = makeClient({ emitNormalized: true });
+    client.validate(file, { emitNormalized: false });
+    assert.equal(lastValidateMessage(worker).options.emitNormalized, false);
+});

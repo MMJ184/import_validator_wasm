@@ -83,6 +83,12 @@ impl ValidatorEngine {
         self.core.errors_count()
     }
 
+    /// Errors found but not kept because the queue was at `max_errors`.
+    /// Drained errors + this = every problem in the file.
+    pub fn errors_suppressed(&self) -> f64 {
+        self.core.errors_suppressed() as f64
+    }
+
     /// Total data rows processed so far (header excluded).
     pub fn rows_processed(&self) -> u32 {
         self.core.rows_processed()

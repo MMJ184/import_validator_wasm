@@ -18,6 +18,8 @@ export class ValidatorClient {
     private worker: Worker;
     private events: ValidatorEvents;
     private baseProfile: ValidationProfile;
+    /** Constructor-level emitNormalized, if the caller set one explicitly. */
+    private baseEmitNormalized: boolean | undefined;
 
     private isReady = false;
     private pendingValidates: Array<{ file: File; options?: ValidateFileOptions }> = [];
@@ -26,6 +28,7 @@ export class ValidatorClient {
         this.events = events;
         const baseProfile = opts.profile ?? "balanced";
         this.baseProfile = baseProfile;
+        this.baseEmitNormalized = opts.emitNormalized;
         const baseDefaults = profileDefaults(baseProfile);
 
         this.worker = createWorker({
@@ -72,7 +75,7 @@ export class ValidatorClient {
                     events.onNormalized?.(m.chunk);
                     break;
                 case "done":
-                    events.onDone?.();
+                    events.onDone?.(m.errorsSuppressed);
                     break;
                 case "fatal":
                     events.onFatal?.(m.message, m.error as ValidationFatal | undefined);
@@ -110,9 +113,14 @@ export class ValidatorClient {
         const activeProfile = options?.profile ?? this.baseProfile;
         const defaults = profileDefaults(activeProfile);
 
+        // Per-call option wins; then the constructor's explicit choice (still
+        // size-gated); then the profile default. Without the constructor tier
+        // `new ValidatorClient({ emitNormalized: true })` would never emit,
+        // because every profile default is false.
         const emitNormalized =
             options?.emitNormalized ??
-            (defaults.emitNormalized && chooseEmitNormalizedSmart(file.size));
+            ((this.baseEmitNormalized ?? defaults.emitNormalized) &&
+                chooseEmitNormalizedSmart(file.size));
         const chunkSize =
             options?.chunkSize ??
             chooseChunkSizeSmart(file.size);

@@ -235,7 +235,9 @@ async function validateWithSignal(
         );
 
         if (estimateOnly) {
-            post({ type: "done" });
+            // Nothing was validated, so zero errors were suppressed — not
+            // `undefined`, which means "worker predates this field".
+            post({ type: "done", errorsSuppressed: 0 });
             return { rowsProcessed: 0, errorsPosted: 0, dryRun: true };
         }
 
@@ -244,7 +246,7 @@ async function validateWithSignal(
         const engine = await takeOrCreateEngine(state, maxErrors, emitNormalized);
 
         const out = await runXlsx(req.file, engine, post, {
-            emitNormalized: req.options.emitNormalized,
+            emitNormalized,
             maxPostErrorsTotal: req.options.maxPostErrorsTotal,
             postErrorBatch: req.options.postErrorBatch,
             maxErrorRowsToShow: req.options.maxErrorRowsToShow,
@@ -270,7 +272,7 @@ async function validateWithSignal(
         signal
     );
     if (estimateOnly) {
-        post({ type: "done" });
+        post({ type: "done", errorsSuppressed: 0 });
         return { rowsProcessed: 0, errorsPosted: 0, dryRun: true };
     }
 
@@ -279,7 +281,7 @@ async function validateWithSignal(
     const engine = await takeOrCreateEngine(state, maxErrors, emitNormalized);
 
     const out = await runCsv(req.file, engine, post, {
-        emitNormalized: req.options.emitNormalized,
+        emitNormalized,
         maxPostErrorsTotal: req.options.maxPostErrorsTotal,
         postErrorBatch: req.options.postErrorBatch,
         maxErrorRowsToShow: req.options.maxErrorRowsToShow,
